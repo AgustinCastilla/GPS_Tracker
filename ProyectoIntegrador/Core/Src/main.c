@@ -112,7 +112,7 @@ uint16_t MQTTkeepAlive = 300; // Tiempo desconectado para que el host olvide el 
 SemaphoreHandle_t Semaphore_MQTT_Ping;
 SemaphoreHandle_t Semaphore_MQTT_Logged;
 
-SemaphoreHandle_t Semaphore_GSM_TX;
+//SemaphoreHandle_t Semaphore_GSM_TX;
 
 QueueHandle_t Screen_Update_Queue;
 
@@ -258,13 +258,13 @@ void MQTT_Connect_Task(void * pvParameters)
 			else if(gsm_registered == 5) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (5)\r\n", 21, HAL_MAX_DELAY);
 			else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: NOT REGISTERED\r\n", 21, HAL_MAX_DELAY);
 
-			if(gsm_registered == 1)
+			/*if(gsm_registered == 1)
 			{
 				xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
 				GSM_Send_SMS((char *) "541138000533", (char *) "HOLA", 4);
 				xSemaphoreGive(Semaphore_GSM_TX);
 				vTaskDelay(10000 / portTICK_RATE_MS);
-			}
+			}*/
 		}
 		else if(gsm_connected == DISCONNECTED)
 		{
@@ -387,10 +387,10 @@ void MQTT_Publish_Task(void * pvParameters)
 	{
 		if(B1_Test == 1)
 		{
-			xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
-			GSM_Send_SMS((char *) "541138000533", (char *) "HOLA GG", 7);
+			//xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
+			GSM_Send_SMS((uint8_t *) "541138000533", (uint8_t *) "HOLA GG", 7);
 			//GSM_MQTT_Disconnect();
-			xSemaphoreGive(Semaphore_GSM_TX);
+			//xSemaphoreGive(Semaphore_GSM_TX);
 			B1_Test = 0;
 		}
 		xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
@@ -420,9 +420,9 @@ void MQTT_Publish_Task(void * pvParameters)
 		};
 		uint8_t TXlength = Parse_Transmit_Packet((uint8_t *) &TXbuffer, RMCdata, GGAdata, ADC_Value, flags);
 		if(TXlength > 0) {
-			xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
+			//xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
 			GSM_MQTT_Pub("Prueba", (char *) &TXbuffer);
-			xSemaphoreGive(Semaphore_GSM_TX);
+			//xSemaphoreGive(Semaphore_GSM_TX);
 			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing done!\r\n", 23, HAL_MAX_DELAY);
 			uint8_t value = SCREEN_UPDATE_MQTTPUB;
 			xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
@@ -438,9 +438,9 @@ void MQTT_Ping_Task(void * pvParameters)
 	{
 		xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
 		xSemaphoreGive(Semaphore_MQTT_Ping);
-		xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
+		//xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
 		GSM_MQTT_Ping();
-		xSemaphoreGive(Semaphore_GSM_TX);
+		//xSemaphoreGive(Semaphore_GSM_TX);
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq\r\n", 14, HAL_MAX_DELAY);
 		uint8_t value = SCREEN_UPDATE_MQTTPING;
 		xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
@@ -605,9 +605,9 @@ int main(void)
 
   Semaphore_MQTT_Ping = xSemaphoreCreateBinary();
   Semaphore_MQTT_Logged = xSemaphoreCreateBinary();
-  Semaphore_GSM_TX = xSemaphoreCreateBinary();
+  //Semaphore_GSM_TX = xSemaphoreCreateBinary();
 
-  xSemaphoreGive(Semaphore_GSM_TX);
+  //xSemaphoreGive(Semaphore_GSM_TX);
 
   //xSemaphoreGive(Semaphore_Screen_Update);
 
