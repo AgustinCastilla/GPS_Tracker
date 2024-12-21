@@ -118,30 +118,23 @@ QueueHandle_t Screen_Update_Queue;
 
 uint16_t ADC_Value = 0;
 
+const uint8_t numero_de_prueba[13] = "541138000000";
+
 /*
  * TODO:
  * Renombrar variables de GPS.c y GSM.c para que sigan alguna lógica común...
  * Renombrar funciones de GPS.c y GSM.c para que sigan alguna lógica común...
- * Ver el tema de #include cmsis_os.h en los archivos o incluir semáforos, tasks, queues, a mano.
- * Hacer funcionar pantalla.
- * Hacer funcionar ADC.
  * Hacer funcionar USB.
  * Chequear si 'GSM_Read_SMS' y 'GSM_Delete_SMS' funcionan.
+ * Reemplazar semáforos que sólo son recibidos en una tarea por notificaciones.
  *
- * Cosas variables:
+ * Cosas variables a agregar en QT:
  * - Frecuencia de conversión del ADC.
- * - Frecuencia de envío de datos.
- * - Que datos se envían.
- * - Frecuencia del módulo GPS.
- * - Datos de conexión para MQTT.
- *
+ * - Formato de GPS (DDD, DMM, DMS).
  *
  * Dudas:
  * - Ver el tema de #include cmsis_os.h en los archivos o incluir semáforos, tasks, queues, a mano.
- * - Variables globales? Reemplazo?
  * - Debería iniciar tasks en los .c o que tengan una función "Tick" a ser llamada?
- * - Que tan bien es usar cosas de FreeRTOS en los .c
- * - portYIELD_FROM_ISR en los RxITByte... supongo que van, no?
  */
 
 /* USER CODE END PV */
@@ -175,10 +168,6 @@ void Screen_Update_Task(void * pvParameters);
 /* USER CODE BEGIN 0 */
 
 // Callbacks
-/*void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
-{
-	ADC_Value = hadc->Instance->
-}*/
 
 uint8_t B1_Test = 0;
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -261,7 +250,7 @@ void MQTT_Connect_Task(void * pvParameters)
 			/*if(gsm_registered == 1)
 			{
 				xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
-				GSM_Send_SMS((char *) "541138000533", (char *) "HOLA", 4);
+				GSM_Send_SMS((char *) &numero_de_prueba, (char *) "HOLA", 4);
 				xSemaphoreGive(Semaphore_GSM_TX);
 				vTaskDelay(10000 / portTICK_RATE_MS);
 			}*/
@@ -387,11 +376,14 @@ void MQTT_Publish_Task(void * pvParameters)
 	{
 		if(B1_Test == 1)
 		{
-			//xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
-			GSM_Send_SMS((uint8_t *) "541138000533", (uint8_t *) "HOLA GG", 7);
-			//GSM_MQTT_Disconnect();
-			//xSemaphoreGive(Semaphore_GSM_TX);
+			/*
+			uint8_t MSG_TEST[9] = "\rHOLA 01";
+			MSG_TEST[8] = 26;
+			GSM_Send_SMS((uint8_t *) &numero_de_prueba, (uint8_t *) &MSG_TEST, 9);
+			*/
+			GSM_Send_SMS((uint8_t *) &numero_de_prueba, (uint8_t *) "HOLA 01", 7);
 			B1_Test = 0;
+			vTaskDelay(15 * 1000 / portTICK_PERIOD_MS);
 		}
 		xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
 		xSemaphoreGive(Semaphore_MQTT_Logged);

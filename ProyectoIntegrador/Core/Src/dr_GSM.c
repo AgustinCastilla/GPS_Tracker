@@ -27,6 +27,13 @@
 
 #define SMS_TX_CODE			0xFF
 
+#define	BIT_MQTT_CONNECTED	( (EventBits_t) (0x01 << 0) )
+#define BIT_MQTT_LOGGED		( (EventBits_t) (0x01 << 1) )
+
+#define BIT_RESET_ACTIVE	( (EventBits_t) (0x01 << 0) )
+#define BIT_RESET_SMS_READY	( (EventBits_t) (0x01 << 1) )
+#define BIT_RESET_AT_READY	( (EventBits_t) (0x01 << 2) )
+
 /*************************************************************
  * Macros
  ************************************************************/
@@ -55,27 +62,24 @@ typedef struct {
  * Static Variables
  ************************************************************/
 
-static uint8_t _reset = 0;
-static uint8_t _sms_ready = 0;
-static uint8_t _at_ready = 0;
-static GPIO_TypeDef * _RST_GPIO = 0;
-static uint32_t _RST_GPIO_Pin = 0;
+// Variables a remover:
 
-static UART_HandleTypeDef * _UART_Handle = NULL;
+//static uint8_t _reset = 0;
+//static uint8_t _sms_ready = 0;
+//static uint8_t _at_ready = 0;
 
 //static uint8_t _tx_buffer[TX_BUFFER_MAX][CMD_STR_MAX] = {'\0'};
 //static uint8_t _tx_buffer_len[TX_BUFFER_MAX] = {0};
 //static Handshake_t _tx_wait_busy[TX_BUFFER_MAX] = {0};
-static uint8_t _tx_index = 0;
-static uint8_t _tx_index_last = 0;
-static uint8_t _tx_index_actual = 0;
-static SemaphoreHandle_t _tx_smph = NULL;
+//static uint8_t _tx_index = 0;
+//static uint8_t _tx_index_last = 0;
+//static uint8_t _tx_index_actual = 0;
+//static SemaphoreHandle_t _tx_smph = NULL;
 //static SemaphoreHandle_t _tx_smph_func[TX_BUFFER_MAX] = {NULL};
 static uint8_t _tx_sms[GSM_SMS_MAX_LEN] = {'\0'};
 
-static uint8_t _rx_buffer[RX_BUFFER_MAX][CMD_STR_MAX] = {'\0'};
-static uint8_t _rx_index = 0;
-static SemaphoreHandle_t _rx_smph = NULL;
+//static uint8_t _rx_index = 0;
+//static SemaphoreHandle_t _rx_smph = NULL;
 static uint8_t _rx_sms[GSM_SMS_MAX_LEN] = {'\0'};
 static uint8_t _rx_sms_length = 0;
 static uint8_t _last_sms_index = 0;
@@ -83,20 +87,31 @@ static uint8_t _last_sms_index = 0;
 static uint8_t _rx_last_index = 0;
 static GSM_Error_t _rx_last_error = 0;
 
-static SemaphoreHandle_t _mqtt_conected_smph = NULL;
-static uint8_t _mqtt_connected = DISCONNECTED;
-static uint8_t _mqtt_logged = NOT_LOGGED;
+//static SemaphoreHandle_t _mqtt_conected_smph = NULL;
+//static uint8_t _mqtt_connected = DISCONNECTED;
+//static uint8_t _mqtt_logged = NOT_LOGGED;
 
-static uint8_t _mqtt_reason_code = 1;
+// Variables finales:
 
-uint8_t _busy = 0;
+static GPIO_TypeDef * _RST_GPIO = 0;
+static uint32_t _RST_GPIO_Pin = 0;
 
+static UART_HandleTypeDef * _UART_Handle = NULL;
+
+static EventGroupHandle_t EventGroup_Reset_Status;
 
 static uint8_t waiting_handshake_arrow = 0;
 static QueueHandle_t Queue_TX;
+static SemaphoreHandle_t Semaphore_TX;
 static SemaphoreHandle_t Semaphore_TX_Busy;
 static SemaphoreHandle_t Semaphore_TX_Function;
 static QueueHandle_t Queue_Function_Wait;
+
+static uint8_t _rx_buffer[RX_BUFFER_MAX][CMD_STR_MAX] = {'\0'};
+static SemaphoreHandle_t Semaphore_RX_Parse;
+
+static EventGroupHandle_t EventGroup_MQTT_Status;
+
 //static QueueHandle_t Queue_TEST_WAIT;
 
 /*************************************************************
@@ -117,12 +132,16 @@ static void Reset_Module(void)
 {
 	if(_RST_GPIO == 0 || _RST_GPIO_Pin == 0) return;
 
-	_reset = 1;
-	_mqtt_connected = DISCONNECTED;
-	_mqtt_logged = NOT_LOGGED;
+	//_reset = 1;
+	//_mqtt_connected = DISCONNECTED;
+	//_mqtt_logged = NOT_LOGGED;
+	xEventGroupClearBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED | BIT_MQTT_LOGGED);
+
 	HAL_GPIO_WritePin(_RST_GPIO, _RST_GPIO_Pin, GPIO_PIN_RESET);
 	vTaskDelay(150 / portTICK_RATE_MS);
 	HAL_GPIO_WritePin(_RST_GPIO, _RST_GPIO_Pin, GPIO_PIN_SET);
+
+	xEventGroupSetBits(EventGroup_Reset_Status, BIT_RESET_ACTIVE);
 }
 
 static void Unbusy_TX(SemaphoreHandle_t functionSemaphore)
@@ -132,7 +151,6 @@ static void Unbusy_TX(SemaphoreHandle_t functionSemaphore)
 	if(functionSemaphore != NULL)
 		xSemaphoreGive(functionSemaphore);
 
-	_busy ++;
 	xSemaphoreGive(Semaphore_TX_Busy);
 }
 
@@ -142,29 +160,35 @@ static void Transmit_Task(void * pvParameters)
 
 	while(1)
 	{
-		if(_reset == 1)
+		uint8_t resetStatus = xEventGroupGetBits(EventGroup_Reset_Status);
+		//if(_reset)
+		if(resetStatus & BIT_RESET_ACTIVE)
 		{
-			if(_at_ready == 0) {
+			uint8_t ATReady = resetStatus & BIT_RESET_AT_READY;
+			uint8_t SMSReady = resetStatus & BIT_RESET_SMS_READY;
+			if(ATReady == 0) {
 				HAL_UART_Transmit(_UART_Handle, (uint8_t *) "AT\r\n", 4, HAL_MAX_DELAY);
 				//_busy --;
 			}
 
 			vTaskDelay(500 / portTICK_RATE_MS);
 
-			if(_at_ready == 1 && _sms_ready == 1)
+			if(ATReady && SMSReady)
 			{
-				_at_ready = 0;
-				_sms_ready = 0;
-				_reset = 0;
+				xEventGroupClearBits(EventGroup_Reset_Status,
+						BIT_RESET_ACTIVE | BIT_RESET_AT_READY | BIT_RESET_SMS_READY);
+				//_at_ready = 0;
+				//_sms_ready = 0;
+				//_reset = 0;
 			}
 		}
 		else
 		{
-			if(_tx_index_actual == _tx_index) xSemaphoreTake(_tx_smph, portMAX_DELAY);
-			else
-			{
+			//if(_tx_index_actual == _tx_index) xSemaphoreTake(_tx_smph, portMAX_DELAY);
+			//else
+			//{
+				xSemaphoreTake(Semaphore_TX, portMAX_DELAY);
 				xSemaphoreTake(Semaphore_TX_Busy, portMAX_DELAY);
-				_busy --;
 
 				SIM_TX_Data_t TEST;
 				if(xQueueReceive(Queue_TX, &TEST, 0) == pdFAIL)
@@ -173,11 +197,18 @@ static void Transmit_Task(void * pvParameters)
 				}
 
 				//uint8_t length = _tx_buffer_len[_tx_index_actual];
-				SIM_Function_Wait_t wait_function_data = {
+				if(TEST.rx_handshake != HANDSHAKE_NONE)
+				{
+					SIM_Function_Wait_t wait_function_data = {
 						.rx_handshake = TEST.rx_handshake,
 						.wait_semaphore = TEST.wait_semaphore
-				};
-				xQueueSend(Queue_Function_Wait, &wait_function_data, portMAX_DELAY);
+					};
+
+					if(xQueueSend(Queue_Function_Wait, &wait_function_data, portMAX_DELAY) == pdFAIL)
+					{
+						__NOP(); // Error check
+					}
+				}
 				//xQueueSend(Queue_TEST_WAIT, &(TEST.rx_handshake), portMAX_DELAY);
 				if(TEST.rx_handshake == HANDSHAKE_ARROW)
 					waiting_handshake_arrow = 1;
@@ -187,18 +218,19 @@ static void Transmit_Task(void * pvParameters)
 				if(TEST.isSMS == 0)
 					HAL_UART_Transmit(_UART_Handle, (uint8_t *) TEST.data, TEST.length, HAL_MAX_DELAY);
 				else
-					HAL_UART_Transmit(_UART_Handle, (uint8_t *) &_tx_sms, strlen((char *) &_tx_sms), HAL_MAX_DELAY);
+					HAL_UART_Transmit(_UART_Handle, (uint8_t *) &_tx_sms, TEST.length, HAL_MAX_DELAY);
+					//HAL_UART_Transmit(_UART_Handle, (uint8_t *) &_tx_sms, strlen((char *) &_tx_sms), HAL_MAX_DELAY);
 
 				_rx_last_error = GSM_ERR_OK;
-				_tx_index_last = _tx_index_actual;
+				//_tx_index_last = _tx_index_actual;
 
-				__INCREASE_COUNT(_tx_index_actual, TX_BUFFER_MAX);
+				//__INCREASE_COUNT(_tx_index_actual, TX_BUFFER_MAX);
 
 				//if(_tx_wait_busy[_tx_index_last] == HANDSHAKE_NONE)
 				if(TEST.rx_handshake == HANDSHAKE_NONE)
 					Unbusy_TX(TEST.wait_semaphore);
 
-			}
+			//}
 		}
 	}
 }
@@ -208,7 +240,8 @@ static void Receive_Task(void * pvParameters)
 	static uint8_t index = 0;
 	while(1)
 	{
-		xSemaphoreTake(_rx_smph, portMAX_DELAY);
+		xSemaphoreTake(Semaphore_RX_Parse, portMAX_DELAY);
+		//xSemaphoreTake(_rx_smph, portMAX_DELAY);
 		uint8_t aux_err[6] = {'\0'};
 		memcpy(aux_err, &_rx_buffer[index][5], 5);
 
@@ -217,8 +250,9 @@ static void Receive_Task(void * pvParameters)
 
 		if(__RESP_CHECK(index, "CONNECT"))
 		{
-			_mqtt_connected = CONNECTED;
-			xSemaphoreGive(_mqtt_conected_smph);
+			//_mqtt_connected = CONNECTED;
+			//xSemaphoreGive(_mqtt_conected_smph);
+			xEventGroupSetBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED);
 			Unbusy_TX(wait_function_data.wait_semaphore);
 		}
 		else if(__RESP_CHECK(index, "+CME ERROR"))
@@ -233,8 +267,10 @@ static void Receive_Task(void * pvParameters)
 		}
 		else if(__RESP_CHECK(index, "OK"))
 		{
-			if(_reset == 1)
-				_at_ready = 1;
+			//if(_reset == 1)
+			//	_at_ready = 1;
+			if(xEventGroupGetBits(EventGroup_Reset_Status) & BIT_RESET_ACTIVE)
+				xEventGroupSetBits(EventGroup_Reset_Status, BIT_RESET_AT_READY);
 			else
 				Unbusy_TX(wait_function_data.wait_semaphore);
 		}
@@ -262,14 +298,17 @@ static void Receive_Task(void * pvParameters)
 		}
 		else if(__RESP_CHECK(index, "CLOSED"))
 		{
-			_mqtt_connected = DISCONNECTED;
-			_mqtt_logged = NOT_LOGGED;
-			xSemaphoreTake(_mqtt_conected_smph, portMAX_DELAY);
+			//_mqtt_connected = DISCONNECTED;
+			//_mqtt_logged = NOT_LOGGED;
+			//xSemaphoreTake(_mqtt_conected_smph, portMAX_DELAY);
+			xEventGroupClearBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED | BIT_MQTT_LOGGED);
 		}
 		else if(__RESP_CHECK(index, "SMS Ready"))
 		{
-			if(_reset == 1)
-				_sms_ready = 1;
+			//if(_reset == 1)
+			//	_sms_ready = 1;
+			if(xEventGroupGetBits(EventGroup_Reset_Status) & BIT_RESET_ACTIVE)
+				xEventGroupSetBits(EventGroup_Reset_Status, BIT_RESET_SMS_READY);
 		}
 		else if(__RESP_CHECK(index, "IPD"))
 		{
@@ -278,8 +317,11 @@ static void Receive_Task(void * pvParameters)
 			{
 				case MQTT_CONNACK:
 				{
-					_mqtt_reason_code = _rx_buffer[index][tcpStart+3];
-					if(_mqtt_reason_code == 0) _mqtt_logged = LOGGED;
+					uint8_t mqttReasonCode = _rx_buffer[index][tcpStart+3];
+					if(mqttReasonCode == 0) {
+						//_mqtt_logged = LOGGED;
+						xEventGroupSetBits(EventGroup_MQTT_Status, BIT_MQTT_LOGGED);
+					}
 					break;
 				}
 				case MQTT_PINGRESP:
@@ -308,7 +350,7 @@ static void Receive_Task(void * pvParameters)
 
 static void Add_CMD_To_Queue(uint8_t * command, uint8_t length, SemaphoreHandle_t wakeUpSmph, Handshake_t handshakeType)
 {
-	//static uint8_t sms_next = 0;
+	static uint8_t sms_next = 0;
 
 	/*if(sms_next == 0)
 	{
@@ -337,16 +379,27 @@ static void Add_CMD_To_Queue(uint8_t * command, uint8_t length, SemaphoreHandle_
 			.length = length,
 			.rx_handshake = handshakeType,
 			.wait_semaphore = wakeUpSmph,
-			.isSMS = 0
+			.isSMS = sms_next
 	};
-	memcpy(TEST.data, command, length);
+
+	if(sms_next == 0)
+		memcpy(TEST.data, command, length);
+	else
+		memcpy(&_tx_sms, command, length);
+
+	if(strstr((char *) command, "AT+CMGS") != NULL)
+		sms_next = 1;
+	else
+		sms_next = 0;
+
 	xQueueSend(Queue_TX, &TEST, portMAX_DELAY);
 
 	/*_tx_smph_func[_tx_index] = wakeUpSmph;
 	_tx_wait_busy[_tx_index] = handshakeType;*/
 
-	__INCREASE_COUNT(_tx_index, TX_BUFFER_MAX);
-	xSemaphoreGive(_tx_smph);
+	//__INCREASE_COUNT(_tx_index, TX_BUFFER_MAX);
+	//xSemaphoreGive(_tx_smph);
+	xSemaphoreGive(Semaphore_TX);
 }
 
 /*************************************************************
@@ -363,17 +416,25 @@ void GSM_RST_GPIO(GPIO_TypeDef * GPIOx, uint16_t GPIO_Pin)
 BaseType_t GSM_Init(UART_HandleTypeDef * huart, UBaseType_t txPriority, UBaseType_t rxPriority, uint32_t txWaitTimeMs)
 {
 	_UART_Handle = huart;
-	_tx_smph = xSemaphoreCreateBinary();
-	_rx_smph = xSemaphoreCreateBinary();
-	_mqtt_conected_smph = xSemaphoreCreateBinary();
+	//_tx_smph = xSemaphoreCreateBinary();
+	//_rx_smph = xSemaphoreCreateBinary();
+
+	EventGroup_Reset_Status = xEventGroupCreate();
+
+	Semaphore_TX = xSemaphoreCreateCounting(TX_BUFFER_MAX, 0);
 	Semaphore_TX_Function = xSemaphoreCreateBinary();
 	Semaphore_TX_Busy = xSemaphoreCreateBinary();
     xSemaphoreGive(Semaphore_TX_Function);
     xSemaphoreGive(Semaphore_TX_Busy);
     //Queue_TEST_WAIT = xQueueCreate(1, sizeof(Handshake_t));
-    _busy ++;
+
 	Queue_TX = xQueueCreate(TX_BUFFER_MAX, sizeof(SIM_TX_Data_t));
 	Queue_Function_Wait = xQueueCreate(1, sizeof(SIM_Function_Wait_t));
+
+	Semaphore_RX_Parse = xSemaphoreCreateCounting(RX_BUFFER_MAX, 0);
+
+	//_mqtt_conected_smph = xSemaphoreCreateBinary();
+	EventGroup_MQTT_Status = xEventGroupCreate();
 
 	BaseType_t Task_Check;
 	xTaskCreate(Transmit_Task, "GSM TX Task", configMINIMAL_STACK_SIZE, (void *) txWaitTimeMs, txPriority, NULL);
@@ -386,6 +447,8 @@ void GSM_RxITByte(uint8_t rxByte)
 {
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
+	static uint8_t index = 0;
+
 	static uint16_t charIndex = 0;
 	static uint8_t smsNext = 0;
 	static uint8_t tcpPacketNext = 0;
@@ -394,7 +457,7 @@ void GSM_RxITByte(uint8_t rxByte)
 	if(tcpPacketNext == 0)
 	{
 		if(!smsNext) {
-			_rx_buffer[_rx_index][charIndex] = rxByte;
+			_rx_buffer[index][charIndex] = rxByte;
 			__INCREASE_COUNT(charIndex, CMD_STR_MAX);
 		}
 		else {
@@ -411,14 +474,15 @@ void GSM_RxITByte(uint8_t rxByte)
 			{
 				if(rxByte == ' ')
 				{
-					if(_rx_buffer[_rx_index][charIndex-2] == '>')
+					if(_rx_buffer[index][charIndex-2] == '>')
 					{
-						__INCREASE_COUNT(_rx_index, RX_BUFFER_MAX);
-						memset(_rx_buffer[_rx_index], '\0', CMD_STR_MAX);
+						__INCREASE_COUNT(index, RX_BUFFER_MAX);
+						memset(_rx_buffer[index], '\0', CMD_STR_MAX);
 						waiting_handshake_arrow = 0;
 						charIndex = 0;
 						smsNext = 0;
-						xSemaphoreGiveFromISR(_rx_smph, &xHigherPriorityTaskWoken);
+						xSemaphoreGiveFromISR(Semaphore_RX_Parse, &xHigherPriorityTaskWoken);
+						//xSemaphoreGiveFromISR(_rx_smph, &xHigherPriorityTaskWoken);
 					}
 				}
 			}
@@ -426,7 +490,7 @@ void GSM_RxITByte(uint8_t rxByte)
 
 		if(rxByte == '\n')
 		{
-			if(strstr((char *) _rx_buffer[_rx_index], "\r\n") != NULL && charIndex == 2)
+			if(strstr((char *) _rx_buffer[index], "\r\n") != NULL && charIndex == 2)
 			{
 				//charIndex = 0;
 			}
@@ -435,11 +499,12 @@ void GSM_RxITByte(uint8_t rxByte)
 				if(!smsNext)
 				{
 					uint8_t aux[6] = {'\0'};
-					memcpy(aux, _rx_buffer[_rx_index], 5);
+					memcpy(aux, _rx_buffer[index], 5);
 
-					__INCREASE_COUNT(_rx_index, RX_BUFFER_MAX);
-					memset(_rx_buffer[_rx_index], '\0', CMD_STR_MAX);
-					xSemaphoreGiveFromISR(_rx_smph, &xHigherPriorityTaskWoken);
+					__INCREASE_COUNT(index, RX_BUFFER_MAX);
+					memset(_rx_buffer[index], '\0', CMD_STR_MAX);
+					xSemaphoreGiveFromISR(Semaphore_RX_Parse, &xHigherPriorityTaskWoken);
+					//xSemaphoreGiveFromISR(_rx_smph, &xHigherPriorityTaskWoken);
 
 					if(strstr((char *) aux, "+CMGR") != 0)
 					{
@@ -500,12 +565,12 @@ void GSM_RxITByte(uint8_t rxByte)
 
 		tcpPacketLen --;
 
-		_rx_buffer[_rx_index][charIndex] = rxByte;
+		_rx_buffer[index][charIndex] = rxByte;
 		__INCREASE_COUNT(charIndex, CMD_STR_MAX);
 
 		if(rxByte == '\n')
 		{
-			if(strstr((char *) _rx_buffer[_rx_index], "\r\n") != NULL && charIndex == 2)
+			if(strstr((char *) _rx_buffer[index], "\r\n") != NULL && charIndex == 2)
 			{
 				charIndex = 0;
 				tcpPacketLen += 2;
@@ -515,15 +580,16 @@ void GSM_RxITByte(uint8_t rxByte)
 		if(rxByte == ':')
 		{
 			uint8_t aux[4] = {0};
-			memcpy(&aux, ((&_rx_buffer[_rx_index][0])+5), (charIndex-2));
+			memcpy(&aux, ((&_rx_buffer[index][0])+5), (charIndex-2));
 			tcpPacketLen = atoi((char *) &aux);
 		}
 
 		if(tcpPacketLen == 0)
 		{
-			__INCREASE_COUNT(_rx_index, RX_BUFFER_MAX);
-			memset(_rx_buffer[_rx_index], '\0', CMD_STR_MAX);
-			xSemaphoreGiveFromISR(_rx_smph, &xHigherPriorityTaskWoken);
+			__INCREASE_COUNT(index, RX_BUFFER_MAX);
+			memset(_rx_buffer[index], '\0', CMD_STR_MAX);
+			xSemaphoreGiveFromISR(Semaphore_RX_Parse, &xHigherPriorityTaskWoken);
+			//xSemaphoreGiveFromISR(_rx_smph, &xHigherPriorityTaskWoken);
 			charIndex = 0;
 			tcpPacketNext = 0;
 		}
@@ -680,11 +746,12 @@ void GSM_Send_SMS(const uint8_t * number, const uint8_t * message, const uint8_t
 	memcpy((uint8_t *) &cmd[10], number, 12);
 
 	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
-	Add_CMD_To_Queue((uint8_t *) "AT+CSMP?\r\n", 10, NULL, HANDSHAKE_OK); // Set module to TEXT.
+	//Add_CMD_To_Queue((uint8_t *) "AT+CSMP?\r\n", 10, NULL, HANDSHAKE_OK); // Set module to TEXT.
 	Add_CMD_To_Queue((uint8_t *) "AT+CMGF=1\r\n", 11, NULL, HANDSHAKE_ARROW); // Set module to TEXT.
 	Add_CMD_To_Queue((uint8_t *) cmd, 25, NULL, HANDSHAKE_ARROW); // Write number.
-	Add_CMD_To_Queue((uint8_t *) "\r", 1, NULL, HANDSHAKE_NONE); // Send Message.
+	//Add_CMD_To_Queue((uint8_t *) "\r", 1, NULL, HANDSHAKE_NONE); // Send Message.
 	Add_CMD_To_Queue((uint8_t *) message, strlen((char *) message), NULL, HANDSHAKE_NONE); // Send Message.
+	//Add_CMD_To_Queue((uint8_t *) message, strlen((char *) message), NULL, HANDSHAKE_OK); // Send Message.
 	Add_CMD_To_Queue((uint8_t *) &END, 1, NULL, HANDSHAKE_OK); // Message terminator.
     xSemaphoreGive(Semaphore_TX_Function);
 }
@@ -825,12 +892,20 @@ uint8_t GSM_SMS_New(void)
 // ============================================================== MQTT
 uint8_t GSM_MQTT_Is_Connected(void)
 {
-	return _mqtt_connected;
+	if(xEventGroupGetBits(EventGroup_MQTT_Status) & BIT_MQTT_CONNECTED)
+		return CONNECTED;
+	else
+		return DISCONNECTED;
+	//return _mqtt_connected;
 }
 
 uint8_t GSM_MQTT_Is_Logged(void)
 {
-	return _mqtt_logged;
+	if(xEventGroupGetBitsFromISR(EventGroup_MQTT_Status) & BIT_MQTT_LOGGED)
+		return LOGGED;
+	else
+		return NOT_LOGGED;
+	//return _mqtt_logged;
 }
 
 GSM_Error_t GSM_NET_Init(void)
@@ -921,8 +996,10 @@ GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * pa
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) return GSM_MQTT_CIPSTART_ERR;
 
-	xSemaphoreTake(_mqtt_conected_smph, portMAX_DELAY);
-	xSemaphoreGive(_mqtt_conected_smph);
+	//xSemaphoreTake(_mqtt_conected_smph, portMAX_DELAY);
+	//xSemaphoreGive(_mqtt_conected_smph);
+	xEventGroupWaitBits(EventGroup_MQTT_Status,
+			BIT_MQTT_CONNECTED, pdFALSE, pdFALSE, portMAX_DELAY);
 
 	uint8_t buffer[MQTT_MAX_PACKET_LEN];
 	uint8_t len = MQTT_Parse_Connect((uint8_t *) &buffer, "STM32", user, password, sessionExpire, keepAlive);
@@ -977,7 +1054,6 @@ void GSM_MQTT_Pub(char * topic, char * payload)
 	itoa(len, (char *) &len_str, 10);
 	strcat((char *) &aux, len_str);
 	strcat((char *) &aux, "\r\n");
-	//taskENTER_CRITICAL();
 	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
 	Add_CMD_To_Queue((uint8_t *) &aux, strlen((char *) &aux), readySH, HANDSHAKE_ARROW); // ---
 	//xSemaphoreTake(readySH, portMAX_DELAY); // ---
@@ -985,25 +1061,21 @@ void GSM_MQTT_Pub(char * topic, char * payload)
 
     Add_CMD_To_Queue((uint8_t *) &buffer, len, NULL, HANDSHAKE_OK);
     xSemaphoreGive(Semaphore_TX_Function);
-
-    //taskEXIT_CRITICAL();
 }
 
 void GSM_MQTT_Ping(void)
 {
 	if(_UART_Handle == NULL) return;
-	//uint8_t cmd[2] = {MQTT_PINGREQ, 0x00};
+	uint8_t cmd[2] = {MQTT_PINGREQ, 0x00};
 
 
-	//SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
-	//uint8_t aux[16] = "AT+CIPSEND=2\r\n";
-	//taskENTER_CRITICAL();
+	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
+	uint8_t aux[16] = "AT+CIPSEND=2\r\n";
 	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
-	//Add_CMD_To_Queue((uint8_t *) &aux, 14, readySH, HANDSHAKE_ARROW); // ---
-	//xSemaphoreTake(readySH, portMAX_DELAY); // ---
+	Add_CMD_To_Queue((uint8_t *) &aux, 14, readySH, HANDSHAKE_ARROW); // ---
+	xSemaphoreTake(readySH, portMAX_DELAY); // ---
 
-
-    //Add_CMD_To_Queue((uint8_t *) &cmd, 2, NULL, HANDSHAKE_OK);
+    Add_CMD_To_Queue((uint8_t *) &cmd, 2, NULL, HANDSHAKE_OK);
     xSemaphoreGive(Semaphore_TX_Function);
 }
 

@@ -23,24 +23,14 @@
  * Static Variables
  ************************************************************/
 
-static uint8_t gps_config[14] = {
-	0xB5, 0x62, 0x06, 0x08, 0x06, 0x00, 0xE8, 0x03, 0x01, 0x00, 0x00/*0x01*/, 0x00, 0x01, 0x39 //(1Hz)
-};
-
-static uint8_t gps_nmea_sentence_config[29] = {
-	'$','P','U','B','X',',','4','0',',',
-	'-','-','-',',','0',',','-',',','0',
-	',','0',',','0',',','0','*','-','-',
-	13, 10};
-
 static UART_HandleTypeDef * GPSuartHandle = NULL;
 static uint8_t NMEAEnabledSentence[NumberOfNMEATypes];
 
-uint8_t _gps_rx_buffer[GPS_RX_BUFFER_SIZE][MAX_NMEA_LEN] = {0};
-NMEA_Raw_Sentence_t nmeaSentences[GPS_RX_BUFFER_SIZE] = {0};
-NMEA_RMC_Sentence_t nmeaRMCSentence = {0};
-NMEA_GGA_Sentence_t nmeaGGASentence = {0};
-xSemaphoreHandle _rx_parse_smph = NULL;
+static uint8_t _gps_rx_buffer[GPS_RX_BUFFER_SIZE][MAX_NMEA_LEN] = {0};
+static NMEA_Raw_Sentence_t nmeaSentences[GPS_RX_BUFFER_SIZE] = {0};
+static NMEA_RMC_Sentence_t nmeaRMCSentence = {0};
+static NMEA_GGA_Sentence_t nmeaGGASentence = {0};
+static xSemaphoreHandle _rx_parse_smph = NULL;
 
 /*************************************************************
  * Static Functions
@@ -118,6 +108,11 @@ void GPS_UBlox_Generate_Checksum(uint8_t * str, uint8_t length)
 void GPS_Config(uint16_t measRate, uint8_t timeRef)
 {
 	if(GPSuartHandle == NULL) return;
+
+	uint8_t gps_config[14] = {
+		0xB5, 0x62, 0x06, 0x08, 0x06, 0x00, 0xE8, 0x03, 0x01, 0x00, 0x00/*0x01*/, 0x00, 0x01, 0x39 //(1Hz)
+	};
+
 	gps_config[7] = (measRate >> 8) & 0xFF;
 	gps_config[6] = measRate & 0xFF;
 	//gps_config[10] = timeRef;
@@ -128,6 +123,12 @@ void GPS_Config(uint16_t measRate, uint8_t timeRef)
 void GPS_Config_Sentence(NMEA_Type_t type, GPS_Sentence_En_t mode)
 {
 	if(GPSuartHandle == NULL) return;
+
+	uint8_t gps_nmea_sentence_config[29] = {
+		'$','P','U','B','X',',','4','0',',',
+		'-','-','-',',','0',',','-',',','0',
+		',','0',',','0',',','0','*','-','-',
+		13, 10};
 
 	//
 	gps_nmea_sentence_config[15] = mode;
