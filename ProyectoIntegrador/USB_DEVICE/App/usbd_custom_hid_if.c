@@ -21,6 +21,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "usbd_custom_hid_if.h"
+#include "dr_usb.h"
 
 /* USER CODE BEGIN INCLUDE */
 
@@ -34,6 +35,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 uint8_t report_buffer[0x40];
+
+extern uint8_t USB_EP1_RX_Buffer[8][0x40];
+extern uint8_t USB_EP1_RX_index;
+
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -124,7 +129,7 @@ __ALIGN_BEGIN static uint8_t CUSTOM_HID_ReportDesc_FS[USBD_CUSTOM_HID_REPORT_DES
 0xb1, 0x02,
 // FEATURE Data,Var,Abs
   /* USER CODE END 0 */
-  0xC0    /*     END_COLLECTION	             */
+  0xC0    /*     END_COLLECTION              */
 };
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
@@ -155,7 +160,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 
 static int8_t CUSTOM_HID_Init_FS(void);
 static int8_t CUSTOM_HID_DeInit_FS(void);
-static int8_t CUSTOM_HID_OutEvent_FS(uint8_t event_idx, uint8_t state);
+static int8_t CUSTOM_HID_OutEvent_FS(uint8_t * state);
 
 /**
   * @}
@@ -204,16 +209,23 @@ static int8_t CUSTOM_HID_DeInit_FS(void)
   * @param  state: Event state
   * @retval USBD_OK if all operations are OK else USBD_FAIL
   */
-static int8_t CUSTOM_HID_OutEvent_FS(uint8_t event_idx, uint8_t state)
+static int8_t CUSTOM_HID_OutEvent_FS(uint8_t * state)
 {
-  /* USER CODE BEGIN 6 */
-  memcpy (report_buffer, state, 0x40);
+	/* USER CODE BEGIN 6 */
 
-  /* Start next USB packet transfer once data processing is completed */
-  USBD_CUSTOM_HID_ReceivePacket(&hUsbDeviceFS);
-  USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *)report_buffer, 0x40);
-  return (USBD_OK);
-  /* USER CODE END 6 */
+	memcpy(&USB_EP1_RX_Buffer[USB_EP1_RX_index], state, 0x40);
+	USB_EP1_RX_index ++;
+	if(USB_EP1_RX_index > 7) USB_EP1_RX_index = 0;
+
+	USB_Process_Reception(state, (uint8_t *) &report_buffer);
+	USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *) &report_buffer, 0x40);
+
+	/* Start next USB packet transfer once data processing is completed */
+	USBD_CUSTOM_HID_ReceivePacket(&hUsbDeviceFS);
+	//USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *)report_buffer, 0x40);
+
+	return (USBD_OK);
+	/* USER CODE END 6 */
 }
 
 /* USER CODE BEGIN 7 */

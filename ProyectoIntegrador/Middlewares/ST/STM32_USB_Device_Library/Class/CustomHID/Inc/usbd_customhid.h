@@ -45,7 +45,7 @@ extern "C" {
 #endif /* CUSTOM_HID_EPIN_ADDR */
 
 #ifndef CUSTOM_HID_EPIN_SIZE
-#define CUSTOM_HID_EPIN_SIZE                         0x02U
+#define CUSTOM_HID_EPIN_SIZE                         0x40U
 #endif /* CUSTOM_HID_EPIN_SIZE */
 
 #ifndef CUSTOM_HID_EPOUT_ADDR
@@ -53,7 +53,7 @@ extern "C" {
 #endif /* CUSTOM_HID_EPOUT_ADDR */
 
 #ifndef CUSTOM_HID_EPOUT_SIZE
-#define CUSTOM_HID_EPOUT_SIZE                        0x02U
+#define CUSTOM_HID_EPOUT_SIZE                        0x40U
 #endif /* CUSTOM_HID_EPOUT_SIZE*/
 
 #define USB_CUSTOM_HID_CONFIG_DESC_SIZ               41U
@@ -68,7 +68,7 @@ extern "C" {
 #endif /* CUSTOM_HID_FS_BINTERVAL */
 
 #ifndef USBD_CUSTOMHID_OUTREPORT_BUF_SIZE
-#define USBD_CUSTOMHID_OUTREPORT_BUF_SIZE            0x02U
+#define USBD_CUSTOMHID_OUTREPORT_BUF_SIZE            0x40U
 #endif /* USBD_CUSTOMHID_OUTREPORT_BUF_SIZE */
 
 #ifndef USBD_CUSTOM_HID_REPORT_DESC_SIZE
@@ -105,7 +105,7 @@ typedef struct _USBD_CUSTOM_HID_Itf
   uint8_t *pReport;
   int8_t (* Init)(void);
   int8_t (* DeInit)(void);
-  int8_t (* OutEvent)(uint8_t event_idx, uint8_t state);
+  int8_t (* OutEvent)(uint8_t * state);
 #ifdef USBD_CUSTOMHID_CTRL_REQ_COMPLETE_CALLBACK_ENABLED
   int8_t (* CtrlReqComplete)(uint8_t request, uint16_t wLength);
 #endif /* USBD_CUSTOMHID_CTRL_REQ_COMPLETE_CALLBACK_ENABLED */

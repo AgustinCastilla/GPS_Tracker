@@ -103,6 +103,22 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN Private defines */
 
+// All in seconds:
+#define	CONFIG_MIN_MQTT_PUB_INTERVAL	3
+#define CONFIG_MIN_MQTT_PING_INTERVAL	30
+#define	CONFIG_MIN_GPS_INTERVAL			1
+#define	CONFIG_MIN_ADC_INTERVAL			1
+#define	CONFIG_MAX_MQTT_PUB_INTERVAL	90
+#define CONFIG_MAX_MQTT_PING_INTERVAL	120
+#define CONFIG_MAX_GPS_INTERVAL			10
+#define	CONFIG_MAX_ADC_INTERVAL			180
+
+#define MQTT_CONNECTED		1
+#define MQTT_CONNECTING		2
+#define MQTT_DISCONNECTED	3
+#define MQTT_DISCONNECTING	4
+#define MQTT_RECONNECT		5
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

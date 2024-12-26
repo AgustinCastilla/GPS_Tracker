@@ -34,6 +34,8 @@
 #define BIT_RESET_SMS_READY	( (EventBits_t) (0x01 << 1) )
 #define BIT_RESET_AT_READY	( (EventBits_t) (0x01 << 2) )
 
+#define TCP_CONNECT_WAIT	7000
+
 /*************************************************************
  * Macros
  ************************************************************/
@@ -248,11 +250,25 @@ static void Receive_Task(void * pvParameters)
 		SIM_Function_Wait_t wait_function_data;
 		xQueueReceive(Queue_Function_Wait, &wait_function_data, 0);
 
-		if(__RESP_CHECK(index, "CONNECT"))
+		if(__RESP_CHECK(index, "CONNECT OK"))
 		{
-			//_mqtt_connected = CONNECTED;
-			//xSemaphoreGive(_mqtt_conected_smph);
 			xEventGroupSetBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED);
+			Unbusy_TX(wait_function_data.wait_semaphore);
+		}
+		else if(__RESP_CHECK(index, "CONNECT FAIL"))
+		{
+			_rx_last_error = GSM_CONN_ERR;
+			xEventGroupClearBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED);
+			Unbusy_TX(wait_function_data.wait_semaphore);
+		}
+		else if(__RESP_CHECK(index, "ALREADY CONNECT"))
+		{
+			//xEventGroupSetBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED);
+			//Unbusy_TX(wait_function_data.wait_semaphore);
+		}
+		else if(__RESP_CHECK(index, "CLOSE OK"))
+		{
+			xEventGroupClearBits(EventGroup_MQTT_Status, BIT_MQTT_CONNECTED);
 			Unbusy_TX(wait_function_data.wait_semaphore);
 		}
 		else if(__RESP_CHECK(index, "+CME ERROR"))
@@ -291,11 +307,6 @@ static void Receive_Task(void * pvParameters)
 			_rx_last_index = index;
 			GSM_New_SMS_Callback(_last_sms_index);
 		}
-		else if(__RESP_CHECK(index, "CONNECT FAIL"))
-		{
-			_rx_last_error = GSM_CONN_ERR;
-			Unbusy_TX(wait_function_data.wait_semaphore);
-		}
 		else if(__RESP_CHECK(index, "CLOSED"))
 		{
 			//_mqtt_connected = DISCONNECTED;
@@ -322,6 +333,11 @@ static void Receive_Task(void * pvParameters)
 						//_mqtt_logged = LOGGED;
 						xEventGroupSetBits(EventGroup_MQTT_Status, BIT_MQTT_LOGGED);
 					}
+					break;
+				}
+				case MQTT_DISCONNECT:
+				{
+					xEventGroupClearBits(EventGroup_MQTT_Status, BIT_MQTT_LOGGED | BIT_MQTT_CONNECTED);
 					break;
 				}
 				case MQTT_PINGRESP:
@@ -676,8 +692,8 @@ uint8_t GSM_COPS(void)
 
 	if(_rx_last_error != GSM_ERR_OK) return ERROR_VALUE;
 
-	if(_rx_buffer[_rx_last_index][12] != '0') return CONNECTED;
-	return DISCONNECTED;
+	if(_rx_buffer[_rx_last_index][12] != '0') return GSM_CONNECTED;
+	return GSM_DISCONNECTED;
 }
 
 uint8_t GSM_GATT(void)
@@ -694,8 +710,8 @@ uint8_t GSM_GATT(void)
 
 	if(_rx_last_error != GSM_ERR_OK) return ERROR_VALUE;
 
-	if(_rx_buffer[_rx_last_index][7] != '1') return CONNECTED;
-	return DISCONNECTED;
+	if(_rx_buffer[_rx_last_index][7] != '1') return GSM_CONNECTED;
+	return GSM_DISCONNECTED;
 
 }
 
@@ -713,8 +729,8 @@ uint8_t GSM_CSTT(void)
 
 	if(_rx_last_error != GSM_ERR_OK) return ERROR_VALUE;
 
-	if(strstr((char *) _rx_buffer[_rx_last_index], "internet") != NULL) return CONNECTED;
-	return DISCONNECTED;
+	if(strstr((char *) _rx_buffer[_rx_last_index], "internet") != NULL) return GSM_CONNECTED;
+	return GSM_DISCONNECTED;
 
 }
 
@@ -826,6 +842,7 @@ void GSM_Read_SMS(uint8_t index, Update_SMS_Record_t update, GSM_SMS_t * output)
 
 	uint8_t numLength = comillas[3] - comillas[2] - 1;
 	memcpy(output->sender, &_rx_buffer[_rx_last_index][comillas[2]+1], numLength);
+	output->sender[14] = '\0';
 	memcpy(output->txt, &_rx_sms, _rx_sms_length);
 	output->txtLength = _rx_sms_length;
 }
@@ -893,18 +910,18 @@ uint8_t GSM_SMS_New(void)
 uint8_t GSM_MQTT_Is_Connected(void)
 {
 	if(xEventGroupGetBits(EventGroup_MQTT_Status) & BIT_MQTT_CONNECTED)
-		return CONNECTED;
+		return TCP_CONNECTED;
 	else
-		return DISCONNECTED;
+		return TCP_DISCONNECTED;
 	//return _mqtt_connected;
 }
 
 uint8_t GSM_MQTT_Is_Logged(void)
 {
 	if(xEventGroupGetBitsFromISR(EventGroup_MQTT_Status) & BIT_MQTT_LOGGED)
-		return LOGGED;
+		return MQTT_LOGGED;
 	else
-		return NOT_LOGGED;
+		return MQTT_NOT_LOGGED;
 	//return _mqtt_logged;
 }
 
@@ -979,7 +996,7 @@ GSM_Error_t GSM_NET_Init(void)
 	return GSM_ERR_OK;
 }
 
-GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * password, uint16_t sessionExpire, uint16_t keepAlive)
+GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * password, char * identifier, uint16_t sessionExpire, uint16_t keepAlive)
 {
 	if(_UART_Handle == NULL) return GSM_HANDLE_NULL;
 	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
@@ -994,15 +1011,21 @@ GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * pa
 	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
 	Add_CMD_To_Queue((uint8_t *) &aux, strlen((char *) &aux)-1, readySH, HANDSHAKE_OK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
-	if(_rx_last_error != GSM_ERR_OK) return GSM_MQTT_CIPSTART_ERR;
+	//if(_rx_last_error != GSM_ERR_OK) return GSM_MQTT_CIPSTART_ERR;
 
 	//xSemaphoreTake(_mqtt_conected_smph, portMAX_DELAY);
 	//xSemaphoreGive(_mqtt_conected_smph);
 	xEventGroupWaitBits(EventGroup_MQTT_Status,
-			BIT_MQTT_CONNECTED, pdFALSE, pdFALSE, portMAX_DELAY);
+			BIT_MQTT_CONNECTED, pdFALSE, pdFALSE, pdMS_TO_TICKS(TCP_CONNECT_WAIT));
+
+	if(!GSM_MQTT_Is_Connected()) {
+	    xSemaphoreGive(Semaphore_TX_Function);
+		vSemaphoreDelete(readySH);
+		return GSM_MQTT_TCP_NOT_CONNECTED;
+	}
 
 	uint8_t buffer[MQTT_MAX_PACKET_LEN];
-	uint8_t len = MQTT_Parse_Connect((uint8_t *) &buffer, "STM32", user, password, sessionExpire, keepAlive);
+	uint8_t len = MQTT_Parse_Connect((uint8_t *) &buffer, identifier, user, password, sessionExpire, keepAlive);
 
 
 	memset((char *) &aux, '\0', sizeof(aux));
@@ -1014,29 +1037,23 @@ GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * pa
 	Add_CMD_To_Queue((uint8_t *) &aux, strlen((char *) &aux)-1, readySH, HANDSHAKE_ARROW); // ---
 	xSemaphoreTake(readySH, portMAX_DELAY); // ---
 
-	vTaskDelay(500 / portTICK_RATE_MS);
-
-
 	Add_CMD_To_Queue((uint8_t *) &buffer, len, NULL, HANDSHAKE_NONE);
     xSemaphoreGive(Semaphore_TX_Function);
-
-	vTaskDelay(100 / portTICK_RATE_MS);
 	vSemaphoreDelete(readySH);
 
 	return GSM_MQTT_ERR_OK;
 }
 
-GSM_SMS_t TEST;
 void GSM_MQTT_Disconnect(void)
 {
 	if(_UART_Handle == NULL) return;
-	vTaskDelay(1000 / portTICK_RATE_MS);
-    Add_CMD_To_Queue((uint8_t *) "+++", 3, NULL, HANDSHAKE_WHATEVER);
-	vTaskDelay(3000 / portTICK_RATE_MS);
-	GSM_Read_SMS(3, MEM_NOT_UPDATE, (GSM_SMS_t *) &TEST);
-    Add_CMD_To_Queue((uint8_t *) "ATO\r\n", 5, NULL, HANDSHAKE_WHATEVER);
+    //Add_CMD_To_Queue((uint8_t *) "+++", 3, NULL, HANDSHAKE_WHATEVER);
+    //Add_CMD_To_Queue((uint8_t *) "ATO\r\n", 5, NULL, HANDSHAKE_WHATEVER);
     //Add_CMD_To_Queue((uint8_t *) "AT+CIPSHUT\r\n", 12, NULL, HANDSHAKE_WHATEVER);
-    //Add_CMD_To_Queue((uint8_t *) "AT+CIPCLOSE\r\n", 13, NULL, HANDSHAKE_WHATEVER);
+	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
+    Add_CMD_To_Queue((uint8_t *) "AT+CIPCLOSE\r\n", 13, readySH, HANDSHAKE_OK);
+	xSemaphoreTake(readySH, portMAX_DELAY);
+	vSemaphoreDelete(readySH);
 }
 
 void GSM_MQTT_Pub(char * topic, char * payload)
@@ -1055,28 +1072,36 @@ void GSM_MQTT_Pub(char * topic, char * payload)
 	strcat((char *) &aux, len_str);
 	strcat((char *) &aux, "\r\n");
 	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
-	Add_CMD_To_Queue((uint8_t *) &aux, strlen((char *) &aux), readySH, HANDSHAKE_ARROW); // ---
-	//xSemaphoreTake(readySH, portMAX_DELAY); // ---
-
-
+	Add_CMD_To_Queue((uint8_t *) &aux, strlen((char *) &aux), readySH, HANDSHAKE_ARROW);
     Add_CMD_To_Queue((uint8_t *) &buffer, len, NULL, HANDSHAKE_OK);
     xSemaphoreGive(Semaphore_TX_Function);
 }
 
+uint8_t TESTPING = 0;
+
 void GSM_MQTT_Ping(void)
 {
+	TESTPING = 1;
 	if(_UART_Handle == NULL) return;
+	TESTPING = 2;
 	uint8_t cmd[2] = {MQTT_PINGREQ, 0x00};
 
-
+	TESTPING = 3;
 	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
+	TESTPING = 4;
 	uint8_t aux[16] = "AT+CIPSEND=2\r\n";
+	TESTPING = 5;
 	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
+	TESTPING = 6;
 	Add_CMD_To_Queue((uint8_t *) &aux, 14, readySH, HANDSHAKE_ARROW); // ---
+	TESTPING = 7;
 	xSemaphoreTake(readySH, portMAX_DELAY); // ---
+	TESTPING = 8;
 
     Add_CMD_To_Queue((uint8_t *) &cmd, 2, NULL, HANDSHAKE_OK);
+    TESTPING = 9;
     xSemaphoreGive(Semaphore_TX_Function);
+    TESTPING = 10;
 }
 
 __weak void GSM_New_SMS_Callback(uint8_t index)

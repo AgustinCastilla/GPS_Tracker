@@ -27,11 +27,14 @@
 #define	GSM_SMS_MAX_LEN		254
 #define	GSM_SENDER_MAX_LEN	15
 
-#define DISCONNECTED		0
-#define CONNECTED			1
+#define GSM_DISCONNECTED		0
+#define GSM_CONNECTED			1
 
-#define NOT_LOGGED			0
-#define LOGGED				1
+#define TCP_DISCONNECTED		0
+#define TCP_CONNECTED			1
+
+#define MQTT_NOT_LOGGED			0
+#define MQTT_LOGGED				1
 
 #define	ERROR_VALUE			0xFF
 
@@ -104,7 +107,8 @@ typedef enum {
 
 typedef enum {
 	GSM_MQTT_ERR_OK,
-	GSM_MQTT_CIPSTART_ERR
+	GSM_MQTT_CIPSTART_ERR,
+	GSM_MQTT_TCP_NOT_CONNECTED
 } GSM_MQTT_Error_t;
 
 /*************************************************************
@@ -155,7 +159,7 @@ uint8_t GSM_MQTT_Is_Connected(void);
 uint8_t GSM_MQTT_Is_Logged(void);
 
 GSM_Error_t GSM_NET_Init(void);
-GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * password, uint16_t sessionExpire, uint16_t keepAlive);
+GSM_MQTT_Error_t GSM_MQTT_Connect(char * ip, char * port, char * user, char * password, char * identifier, uint16_t sessionExpire, uint16_t keepAlive);
 void GSM_MQTT_Disconnect(void);
 void GSM_MQTT_Pub(char * topic, char * payload);
 void GSM_MQTT_Ping(void);

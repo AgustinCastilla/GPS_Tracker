@@ -35,18 +35,12 @@
 #include "dr_Display.h"
 #include "screen_layout.h"
 
+#include "dr_USB.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
-/*typedef enum {
-	scr_updt_gpsrmc,
-	scr_updt_gpsgga,
-	scr_updt_connection,
-	scr_updt_mqttping,
-	scr_updt_mqttpub
-} Screen_Update_t;*/
 
 /* USER CODE END PTD */
 
@@ -65,6 +59,8 @@
 #define SCREEN_UPDATE_MQTTPING		4
 #define SCREEN_UPDATE_MQTTPUB		5
 #define	SCREEN_UPDATE_TICK			6
+
+#define GSM_CONNECTIONG_TASK_DELAY	1500
 
 /* USER CODE END PD */
 
@@ -98,38 +94,69 @@ osThreadId defaultTaskHandle;
  * TIM6: ADC Conversion Trigger
  */
 
+// Peripherals variables.
 uint8_t gpsRxByte;
 uint8_t simRxByte;
+uint16_t ADC_Value = 0;
 
-char MQTThost[32] = "190.18.0.169";
-char MQTTport[8] = "1883";
-//const char MQTTclientIdentifier[6] = "STM32";
-char MQTTusername[32] = "Nucleo";
-char MQTTpassword[32] = "f446re";
-uint16_t MQTTsessionExpire = 180; // Tiempo sin mensajes para ser desconectado del host.
-uint16_t MQTTkeepAlive = 300; // Tiempo desconectado para que el host olvide el dispositivo.
+// Configuration default values.
+const char default_MQTT_host[15] = "190.18.0.169";
+const char default_MQTT_port[5] = "1883";
+const char default_MQTT_topic[16] = "Prueba";
+const char default_MQTT_username[30] = "Nucleo";
+const char default_MQTT_password[30] = "f446re";
+const char default_MQTT_clientIdentifier[16] = "STM32";
+const uint8_t default_MQTT_connectWhenUsbUnplug = 1;
+const uint8_t default_MQTT_publishInterval = 3; // In seconds.
+const uint8_t default_MQTT_pingInterval = 30; // In seconds.
+
+const uint8_t default_GPS_interval = 3; // In seconds.
+const uint8_t default_ADC_interval = 5; // In seconds.
+
+// Configuration values.
+char MQTT_host[15] = "190.18.0.169";
+char MQTT_port[5] = "1883";
+char MQTT_topic[16] = "Prueba";
+char MQTT_username[30] = "Nucleo";
+char MQTT_password[30] = "f446re";
+char MQTT_clientIdentifier[16] = "STM32";
+uint8_t MQTT_connectWhenUsbUnplug = 1;
+uint8_t MQTT_publishInterval = 3; // In seconds.
+uint8_t MQTT_pingInterval = 30; // In seconds.
+
+uint8_t GPS_interval = 3; // In seconds.
+uint8_t ADC_interval = 5; // In seconds.
+
+// Const. variables.
+const uint16_t MQTT_sessionExpire = 180; // Tiempo sin mensajes para ser desconectado del host.
+const uint16_t MQTT_keepAlive = 300; // Tiempo desconectado para que el host olvide el dispositivo.
+
+// FreeRTOS
+SemaphoreHandle_t Semaphore_MQTT_Connect;
+SemaphoreHandle_t Semaphore_MQTT_Disconnect;
 
 SemaphoreHandle_t Semaphore_MQTT_Ping;
 SemaphoreHandle_t Semaphore_MQTT_Logged;
-
-//SemaphoreHandle_t Semaphore_GSM_TX;
-
 QueueHandle_t Screen_Update_Queue;
 
-uint16_t ADC_Value = 0;
-
-const uint8_t numero_de_prueba[13] = "541138000000";
+// Pequé de vagancia
+// Variable en la que deseamos que esté el sistema:
+uint8_t MQTT_connection_objective = MQTT_CONNECTED;
+// Variable en la que se encuentra el sistema:
+uint8_t MQTT_connection_status = MQTT_DISCONNECTED;
 
 /*
  * TODO:
  * Renombrar variables de GPS.c y GSM.c para que sigan alguna lógica común...
  * Renombrar funciones de GPS.c y GSM.c para que sigan alguna lógica común...
- * Hacer funcionar USB.
+ * Modificar lógica para que conecte/desconecte de MQTT cuando se desee.
  * Chequear si 'GSM_Read_SMS' y 'GSM_Delete_SMS' funcionan.
+ * USB: Agregar envío de trama de posición.
+ * USB: Agregar lectura y borrado de SMS.
+ * Reemplazar variables globales en dr_GPS.c por elementos de FreeRTOS.
  * Reemplazar semáforos que sólo son recibidos en una tarea por notificaciones.
  *
  * Cosas variables a agregar en QT:
- * - Frecuencia de conversión del ADC.
  * - Formato de GPS (DDD, DMM, DMS).
  *
  * Dudas:
@@ -168,7 +195,6 @@ void Screen_Update_Task(void * pvParameters);
 /* USER CODE BEGIN 0 */
 
 // Callbacks
-
 uint8_t B1_Test = 0;
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
@@ -198,8 +224,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void GPS_New_Data_Callback(NMEA_Type_t type)
 {
 	uint8_t value;
-	if(type == RMC) value = SCREEN_UPDATE_GPSRMC; //scr_updt_gpsrmc;
-	else if(type == GGA) value = SCREEN_UPDATE_GPSGGA; //scr_updt_gpsgga;
+	if(type == RMC) value = SCREEN_UPDATE_GPSRMC;
+	else if(type == GGA) value = SCREEN_UPDATE_GPSGGA;
 	xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
 }
 
@@ -218,77 +244,95 @@ void MQTT_Connect_Task(void * pvParameters)
 	uint8_t mqtt_connected = 0;
 	uint8_t mqtt_logged = 0;
 
-	uint16_t delay = 1500;
+	uint16_t delay = GSM_CONNECTIONG_TASK_DELAY;
 
 	while(1)
 	{
-		if(mqtt_logged == LOGGED)
+		xSemaphoreTake(Semaphore_MQTT_Connect, portMAX_DELAY);
+		xSemaphoreGive(Semaphore_MQTT_Connect);
+		if(MQTT_connection_objective == MQTT_DISCONNECTED || MQTT_connection_objective == MQTT_RECONNECT)
 		{
-			vTaskSuspend(NULL);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection check...\r\n", 26, HAL_MAX_DELAY);
-			mqtt_logged = GSM_MQTT_Is_Logged();
-			if(mqtt_logged == 0)
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Disconnecting\r\n", 20, HAL_MAX_DELAY);
+			mqtt_connected = 0;
+			mqtt_logged = 0;
+			delay = GSM_CONNECTIONG_TASK_DELAY;
+			MQTT_connection_status = MQTT_DISCONNECTING;
+			xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
+			xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+			xSemaphoreGive(Semaphore_MQTT_Disconnect);
+			xSemaphoreTake(Semaphore_MQTT_Connect, portMAX_DELAY);
+		}
+		else if(MQTT_connection_objective == MQTT_CONNECTED)
+		{
+			if(MQTT_connection_status == MQTT_CONNECTED)
 			{
-				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Disconnected\r\n", 19, HAL_MAX_DELAY);
-				mqtt_connected = 0;
-				xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
-				xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
-				uint8_t value = SCREEN_UPDATE_CONNECTION;
-				xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+				//if(mqtt_logged == MQTT_LOGGED)
+				//{
+					HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection check...\r\n", 26, HAL_MAX_DELAY);
+					mqtt_logged = GSM_MQTT_Is_Logged();
+					if(mqtt_logged == MQTT_NOT_LOGGED)
+					{
+						HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Disconnected\r\n", 19, HAL_MAX_DELAY);
+						mqtt_connected = 0;
+						MQTT_connection_status = MQTT_DISCONNECTED;
+						xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
+						xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+						delay = GSM_CONNECTIONG_TASK_DELAY;
+						uint8_t value = SCREEN_UPDATE_CONNECTION;
+						xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+					}
+				//}
 			}
-			delay = 250;
-		}
-		else if(gsm_registered != 1 && gsm_registered != 5)
-		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: Checking...\r\n", 18, HAL_MAX_DELAY);
-			gsm_registered = GSM_CREG();
-			if(gsm_registered == ERROR_VALUE) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: ERROR\r\n", 12, HAL_MAX_DELAY);
-			else if(gsm_registered == 1) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (1)\r\n", 21, HAL_MAX_DELAY);
-			else if(gsm_registered == 5) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (5)\r\n", 21, HAL_MAX_DELAY);
-			else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: NOT REGISTERED\r\n", 21, HAL_MAX_DELAY);
-
-			/*if(gsm_registered == 1)
+			else if(MQTT_connection_status == MQTT_CONNECTING)
 			{
-				xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
-				GSM_Send_SMS((char *) &numero_de_prueba, (char *) "HOLA", 4);
-				xSemaphoreGive(Semaphore_GSM_TX);
-				vTaskDelay(10000 / portTICK_RATE_MS);
-			}*/
-		}
-		else if(gsm_connected == DISCONNECTED)
-		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connecting to NET (CGATT)...\r\n", 30, HAL_MAX_DELAY);
-			GSM_Error_t gsm_net_status = GSM_NET_Init();
-			if(gsm_net_status == GSM_ERR_OK)
-			{
-				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CONNECTED\r\n", 16, HAL_MAX_DELAY);
-				gsm_connected = CONNECTED;
-			}
-			else if(gsm_net_status == GSM_CIPSHUT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIPSHUR ERROR\r\n", 20, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_GATT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: GATT ERROR\r\n", 17, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CIPMODE_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIPMODE ERROR\r\n", 20, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CSTT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CSTT ERROR\r\n", 17, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CIICR_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIICR ERROR\r\n", 18, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CIFSR_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIFSR ERROR\r\n", 18, HAL_MAX_DELAY);
-			else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: UNKNOWN ERROR\r\n", 20, HAL_MAX_DELAY);
-		}
-		else if(mqtt_connected == DISCONNECTED)
-		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connecting to host and establishing MQTT protocol...\r\n", 54, HAL_MAX_DELAY);
-			GSM_MQTT_Connect(MQTThost, MQTTport, MQTTusername, MQTTpassword, MQTTsessionExpire, MQTTkeepAlive);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connection request ended, checking status...\r\n", 46, HAL_MAX_DELAY);
-			mqtt_connected = GSM_MQTT_Is_Connected();
-		}
-		else if(mqtt_logged == NOT_LOGGED)
-		{
-			mqtt_logged = GSM_MQTT_Is_Logged();
-			if(mqtt_logged == 1) {
-				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection established\r\n", 29, HAL_MAX_DELAY);
-				xSemaphoreGive(Semaphore_MQTT_Ping);
-				xSemaphoreGive(Semaphore_MQTT_Logged);
-				delay = 2500;
-				uint8_t value = SCREEN_UPDATE_CONNECTION;
-				xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connecting...\r\n", 20, HAL_MAX_DELAY);
+				if(gsm_registered != 1 && gsm_registered != 5)
+				{
+					HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: Checking...\r\n", 18, HAL_MAX_DELAY);
+					gsm_registered = GSM_CREG();
+					if(gsm_registered == ERROR_VALUE) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: ERROR\r\n", 12, HAL_MAX_DELAY);
+					else if(gsm_registered == 1) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (1)\r\n", 21, HAL_MAX_DELAY);
+					else if(gsm_registered == 5) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (5)\r\n", 21, HAL_MAX_DELAY);
+					else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: NOT REGISTERED\r\n", 21, HAL_MAX_DELAY);
+				}
+				else if(gsm_connected == GSM_DISCONNECTED)
+				{
+					HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connecting to NET (CGATT)...\r\n", 30, HAL_MAX_DELAY);
+					GSM_Error_t gsm_net_status = GSM_NET_Init();
+					if(gsm_net_status == GSM_ERR_OK)
+					{
+						HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CONNECTED\r\n", 16, HAL_MAX_DELAY);
+						gsm_connected = GSM_CONNECTED;
+					}
+					else if(gsm_net_status == GSM_CIPSHUT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIPSHUR ERROR\r\n", 20, HAL_MAX_DELAY);
+					else if(gsm_net_status == GSM_GATT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: GATT ERROR\r\n", 17, HAL_MAX_DELAY);
+					else if(gsm_net_status == GSM_CIPMODE_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIPMODE ERROR\r\n", 20, HAL_MAX_DELAY);
+					else if(gsm_net_status == GSM_CSTT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CSTT ERROR\r\n", 17, HAL_MAX_DELAY);
+					else if(gsm_net_status == GSM_CIICR_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIICR ERROR\r\n", 18, HAL_MAX_DELAY);
+					else if(gsm_net_status == GSM_CIFSR_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIFSR ERROR\r\n", 18, HAL_MAX_DELAY);
+					else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: UNKNOWN ERROR\r\n", 20, HAL_MAX_DELAY);
+				}
+				else if(mqtt_connected == TCP_DISCONNECTED)
+				{
+					HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connecting to host and establishing MQTT protocol...\r\n", 54, HAL_MAX_DELAY);
+					GSM_MQTT_Connect(MQTT_host, MQTT_port, MQTT_username, MQTT_password, MQTT_clientIdentifier, MQTT_sessionExpire, MQTT_keepAlive);
+					HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connection request ended, checking status...\r\n", 46, HAL_MAX_DELAY);
+					mqtt_connected = GSM_MQTT_Is_Connected();
+				}
+				else if(mqtt_logged == MQTT_NOT_LOGGED)
+				{
+					HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connection request ended, checking status...\r\n", 46, HAL_MAX_DELAY);
+					mqtt_logged = GSM_MQTT_Is_Logged();
+					if(mqtt_logged == MQTT_LOGGED) {
+						HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection established\r\n", 29, HAL_MAX_DELAY);
+						MQTT_connection_status = MQTT_CONNECTED;
+						xSemaphoreGive(Semaphore_MQTT_Ping);
+						xSemaphoreGive(Semaphore_MQTT_Logged);
+						delay = 2 * GSM_CONNECTIONG_TASK_DELAY;
+						uint8_t value = SCREEN_UPDATE_CONNECTION;
+						xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+					}
+				}
 			}
 		}
 		vTaskDelay(delay / portTICK_RATE_MS);
@@ -297,73 +341,59 @@ void MQTT_Connect_Task(void * pvParameters)
 
 void MQTT_Disconnect_Task(void * pvParameters)
 {
-	uint8_t gsm_registered = 0;
-	uint8_t gsm_connected = 0;
+	//uint8_t gsm_registered = 0;
+	//uint8_t gsm_connected = 0;
 	uint8_t mqtt_connected = 0;
-	uint8_t mqtt_logged = 0;
+	//uint8_t mqtt_logged = 0;
 
-	uint16_t delay = 1500;
+	uint8_t mqtt_reconnect = 0;
+
+	uint16_t delay = GSM_CONNECTIONG_TASK_DELAY;
 
 	while(1)
 	{
-		if(mqtt_logged == LOGGED)
+		xSemaphoreTake(Semaphore_MQTT_Disconnect, portMAX_DELAY);
+		xSemaphoreGive(Semaphore_MQTT_Disconnect);
+		if(MQTT_connection_objective == MQTT_CONNECTED)
 		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection check...\r\n", 26, HAL_MAX_DELAY);
-			mqtt_logged = GSM_MQTT_Is_Logged();
-			if(mqtt_logged == 0)
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connecting\r\n", 17, HAL_MAX_DELAY);
+			delay = GSM_CONNECTIONG_TASK_DELAY;
+			MQTT_connection_status = MQTT_CONNECTING;
+			xSemaphoreGive(Semaphore_MQTT_Connect);
+			xSemaphoreTake(Semaphore_MQTT_Disconnect, portMAX_DELAY);
+		}
+		else if(MQTT_connection_objective == MQTT_RECONNECT)
+		{
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Reconnecting\r\n", 19, HAL_MAX_DELAY);
+			mqtt_reconnect = 1;
+			MQTT_connection_objective = MQTT_DISCONNECTED;
+		}
+		else if(MQTT_connection_objective == MQTT_DISCONNECTED)
+		{
+			if(MQTT_connection_status == MQTT_DISCONNECTED)
 			{
 				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Disconnected\r\n", 19, HAL_MAX_DELAY);
-				mqtt_connected = 0;
-				xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
-				xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
 				uint8_t value = SCREEN_UPDATE_CONNECTION;
 				xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+				if(mqtt_reconnect == 1)
+				{
+					mqtt_reconnect = 0;
+					MQTT_connection_objective = MQTT_CONNECTED;
+				}
 			}
-			delay = 250;
-		}
-		else if(gsm_registered != 1 && gsm_registered != 5)
-		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: Checking...\r\n", 18, HAL_MAX_DELAY);
-			gsm_registered = GSM_CREG();
-			if(gsm_registered == ERROR_VALUE) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: ERROR\r\n", 12, HAL_MAX_DELAY);
-			else if(gsm_registered == 1) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (1)\r\n", 21, HAL_MAX_DELAY);
-			else if(gsm_registered == 5) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: REGISTERED (5)\r\n", 21, HAL_MAX_DELAY);
-			else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "REG: NOT REGISTERED\r\n", 21, HAL_MAX_DELAY);
-		}
-		else if(gsm_connected == DISCONNECTED)
-		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connecting to NET (CGATT)...\r\n", 30, HAL_MAX_DELAY);
-			GSM_Error_t gsm_net_status = GSM_NET_Init();
-			if(gsm_net_status == GSM_ERR_OK)
+			else if(MQTT_connection_status == MQTT_DISCONNECTING)
 			{
-				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CONNECTED\r\n", 16, HAL_MAX_DELAY);
-				gsm_connected = CONNECTED;
-			}
-			else if(gsm_net_status == GSM_CIPSHUT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIPSHUR ERROR\r\n", 20, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_GATT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: GATT ERROR\r\n", 17, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CIPMODE_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIPMODE ERROR\r\n", 20, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CSTT_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CSTT ERROR\r\n", 17, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CIICR_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIICR ERROR\r\n", 18, HAL_MAX_DELAY);
-			else if(gsm_net_status == GSM_CIFSR_ERR) HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: CIFSR ERROR\r\n", 18, HAL_MAX_DELAY);
-			else HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "NET: UNKNOWN ERROR\r\n", 20, HAL_MAX_DELAY);
-		}
-		else if(mqtt_connected == DISCONNECTED)
-		{
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connecting to host and establishing MQTT protocol...\r\n", 54, HAL_MAX_DELAY);
-			GSM_MQTT_Connect(MQTThost, MQTTport, MQTTusername, MQTTpassword, MQTTsessionExpire, MQTTkeepAlive);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "Connection request ended, checking status...\r\n", 46, HAL_MAX_DELAY);
-			mqtt_connected = GSM_MQTT_Is_Connected();
-		}
-		else if(mqtt_logged == NOT_LOGGED)
-		{
-			mqtt_logged = GSM_MQTT_Is_Logged();
-			if(mqtt_logged == 1) {
-				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection established\r\n", 29, HAL_MAX_DELAY);
-				xSemaphoreGive(Semaphore_MQTT_Ping);
-				xSemaphoreGive(Semaphore_MQTT_Logged);
-				delay = 250;
-				uint8_t value = SCREEN_UPDATE_CONNECTION;
-				xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+				HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Disconnecting...\r\n", 23, HAL_MAX_DELAY);
+				mqtt_connected = GSM_MQTT_Is_Connected();
+				if(mqtt_connected == TCP_CONNECTED)
+				{
+					GSM_MQTT_Disconnect();
+					mqtt_connected = GSM_MQTT_Is_Connected();
+				}
+				else if(mqtt_connected == TCP_DISCONNECTED)
+				{
+					MQTT_connection_status = MQTT_DISCONNECTED;
+				}
 			}
 		}
 		vTaskDelay(delay / portTICK_RATE_MS);
@@ -376,16 +406,20 @@ void MQTT_Publish_Task(void * pvParameters)
 	{
 		if(B1_Test == 1)
 		{
-			/*
-			uint8_t MSG_TEST[9] = "\rHOLA 01";
-			MSG_TEST[8] = 26;
-			GSM_Send_SMS((uint8_t *) &numero_de_prueba, (uint8_t *) &MSG_TEST, 9);
-			*/
-			GSM_Send_SMS((uint8_t *) &numero_de_prueba, (uint8_t *) "HOLA 01", 7);
+			GSM_SMS_t outputData;
+			GSM_Read_SMS(1, MEM_NOT_UPDATE, &outputData);
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "= SMS index 1: =", 16, HAL_MAX_DELAY);
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\nSender: ", 10, HAL_MAX_DELAY);
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) outputData.sender, strlen((char *) (&outputData.sender)), HAL_MAX_DELAY);
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\nSMS text: ", 12, HAL_MAX_DELAY);
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) outputData.txt, strlen((char *) (&outputData.txt)), HAL_MAX_DELAY);
+			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\n", 2, HAL_MAX_DELAY);
 			B1_Test = 0;
-			vTaskDelay(15 * 1000 / portTICK_PERIOD_MS);
+			//vTaskDelay(15 * 1000 / portTICK_PERIOD_MS);
 		}
+		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing-Take\r\n", 22, HAL_MAX_DELAY);
 		xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing-Give\r\n", 22, HAL_MAX_DELAY);
 		xSemaphoreGive(Semaphore_MQTT_Logged);
 
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing in process...\r\n", 31, HAL_MAX_DELAY);
@@ -412,9 +446,7 @@ void MQTT_Publish_Task(void * pvParameters)
 		};
 		uint8_t TXlength = Parse_Transmit_Packet((uint8_t *) &TXbuffer, RMCdata, GGAdata, ADC_Value, flags);
 		if(TXlength > 0) {
-			//xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
 			GSM_MQTT_Pub("Prueba", (char *) &TXbuffer);
-			//xSemaphoreGive(Semaphore_GSM_TX);
 			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing done!\r\n", 23, HAL_MAX_DELAY);
 			uint8_t value = SCREEN_UPDATE_MQTTPUB;
 			xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
@@ -428,12 +460,13 @@ void MQTT_Ping_Task(void * pvParameters)
 {
 	while(1)
 	{
+		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq-Take\r\n", 19, HAL_MAX_DELAY);
 		xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
+		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq-Give\r\n", 19, HAL_MAX_DELAY);
 		xSemaphoreGive(Semaphore_MQTT_Ping);
-		//xSemaphoreTake(Semaphore_GSM_TX, portMAX_DELAY);
-		GSM_MQTT_Ping();
-		//xSemaphoreGive(Semaphore_GSM_TX);
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq\r\n", 14, HAL_MAX_DELAY);
+		GSM_MQTT_Ping();
+		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq-End\r\n", 18, HAL_MAX_DELAY);
 		uint8_t value = SCREEN_UPDATE_MQTTPING;
 		xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
 		vTaskDelay(120 * 1000 / portTICK_RATE_MS);
@@ -533,7 +566,6 @@ int main(void)
 
   /* Configure the system clock */
   SystemClock_Config();
-
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
@@ -558,6 +590,7 @@ int main(void)
 
   // Start USB
   MX_USB_DEVICE_Init();
+  USB_Process_Init(tskIDLE_PRIORITY + 4);
 
   // GPS Config
   GPS_Init(GPS_UART, tskIDLE_PRIORITY + 2);
@@ -595,11 +628,13 @@ int main(void)
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
 
+  Semaphore_MQTT_Connect = xSemaphoreCreateBinary();
+  Semaphore_MQTT_Disconnect = xSemaphoreCreateBinary();
+  xSemaphoreGive(Semaphore_MQTT_Connect);
+  MQTT_connection_status = MQTT_CONNECTING;
+
   Semaphore_MQTT_Ping = xSemaphoreCreateBinary();
   Semaphore_MQTT_Logged = xSemaphoreCreateBinary();
-  //Semaphore_GSM_TX = xSemaphoreCreateBinary();
-
-  //xSemaphoreGive(Semaphore_GSM_TX);
 
   //xSemaphoreGive(Semaphore_Screen_Update);
 
@@ -630,11 +665,15 @@ int main(void)
   if(Task_Check == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
 	  HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY: MQTT Connect Task\r\n", 58, HAL_MAX_DELAY);
 
+  Task_Check = xTaskCreate(MQTT_Disconnect_Task, "MQTT Disconnect Task", 1024, NULL, tskIDLE_PRIORITY + 1, NULL);
+  if(Task_Check == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
+	  HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY: MQTT Disconnect Task\r\n", 61, HAL_MAX_DELAY);
+
   Task_Check = xTaskCreate(MQTT_Publish_Task, "MQTT Publish Task", 1024, NULL, tskIDLE_PRIORITY + 2, NULL);
   if(Task_Check == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
 	  HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY: MQTT Publish Task\r\n", 58, HAL_MAX_DELAY);
 
-  Task_Check = xTaskCreate(MQTT_Ping_Task, "MQTT Ping Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 2, NULL);
+  Task_Check = xTaskCreate(MQTT_Ping_Task, "MQTT Ping Task", 512, NULL, tskIDLE_PRIORITY + 2, NULL);
   if(Task_Check == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
 	  HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY: MQTT Ping Task\r\n", 5, HAL_MAX_DELAY);
 
