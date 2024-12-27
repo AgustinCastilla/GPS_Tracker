@@ -21,9 +21,10 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "usbd_custom_hid_if.h"
-#include "dr_usb.h"
 
 /* USER CODE BEGIN INCLUDE */
+
+#include "dr_USB.h"
 
 /* USER CODE END INCLUDE */
 
@@ -199,6 +200,8 @@ static int8_t CUSTOM_HID_Init_FS(void)
 static int8_t CUSTOM_HID_DeInit_FS(void)
 {
   /* USER CODE BEGIN 5 */
+  if(MQTT_connectWhenUsbUnplug > 0)
+	  MQTT_connection_objective = MQTT_CONNECTED;
   return (USBD_OK);
   /* USER CODE END 5 */
 }
@@ -211,21 +214,21 @@ static int8_t CUSTOM_HID_DeInit_FS(void)
   */
 static int8_t CUSTOM_HID_OutEvent_FS(uint8_t * state)
 {
-	/* USER CODE BEGIN 6 */
+  /* USER CODE BEGIN 6 */
 
-	memcpy(&USB_EP1_RX_Buffer[USB_EP1_RX_index], state, 0x40);
-	USB_EP1_RX_index ++;
-	if(USB_EP1_RX_index > 7) USB_EP1_RX_index = 0;
+  memcpy(&USB_EP1_RX_Buffer[USB_EP1_RX_index], state, 0x40);
+  USB_EP1_RX_index ++;
+  if(USB_EP1_RX_index > 7) USB_EP1_RX_index = 0;
 
-	USB_Process_Reception(state, (uint8_t *) &report_buffer);
-	USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *) &report_buffer, 0x40);
+  USB_Process_Reception(state, (uint8_t *) &report_buffer);
+  USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *) &report_buffer, 0x40);
 
-	/* Start next USB packet transfer once data processing is completed */
-	USBD_CUSTOM_HID_ReceivePacket(&hUsbDeviceFS);
-	//USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *)report_buffer, 0x40);
+  /* Start next USB packet transfer once data processing is completed */
+  USBD_CUSTOM_HID_ReceivePacket(&hUsbDeviceFS);
+  //USBD_CUSTOM_HID_SendReport (&hUsbDeviceFS, (uint8_t *)report_buffer, 0x40);
 
-	return (USBD_OK);
-	/* USER CODE END 6 */
+  return (USBD_OK);
+  /* USER CODE END 6 */
 }
 
 /* USER CODE BEGIN 7 */

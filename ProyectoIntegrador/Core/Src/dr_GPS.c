@@ -89,7 +89,7 @@ BaseType_t GPS_Init(UART_HandleTypeDef * huart, uint8_t parsePriority)
 	GPSuartHandle = huart;
 	_rx_parse_smph = xSemaphoreCreateBinary();
 	//_rx_parse_smph = xSemaphoreCreateCounting(GPS_RX_BUFFER_SIZE, 0);
-	BaseType_t Task_Check = xTaskCreate(GPS_RX_Parse, "GPS TX Task", configMINIMAL_STACK_SIZE, NULL, parsePriority, NULL);
+	BaseType_t Task_Check = xTaskCreate(GPS_RX_Parse, "GPS TX Task", 1024, NULL, parsePriority, NULL);
 	return Task_Check;
 }
 

@@ -146,6 +146,7 @@ void USB_Process_Reception_Task(void * pvParameters)
 
 					MQTT_connectWhenUsbUnplug = USB_EP1_RX_Buffer[index][5];
 
+
 					uint8_t * MQTT_CIStart = &USB_EP1_RX_Buffer[index][6];
 					uint8_t * MQTT_IPStart = &USB_EP1_RX_Buffer[index][22];
 					uint8_t * MQTT_portStart = &USB_EP1_RX_Buffer[index][37];
@@ -159,6 +160,26 @@ void USB_Process_Reception_Task(void * pvParameters)
 					memcpy(&MQTT_host, MQTT_IPStart, sizeof(MQTT_host));
 					memcpy(&MQTT_port, MQTT_portStart, sizeof(MQTT_port));
 					memcpy(&MQTT_topic, MQTT_topicStart, sizeof(MQTT_topic));
+
+					//htim2.Instance->CR1 &= ~TIM_CR1_CEN;
+					//htim4.Instance->CR1 &= ~TIM_CR1_CEN;
+					//htim5.Instance->CR1 &= ~TIM_CR1_CEN;
+
+					//__HAL_TIM_SET_AUTORELOAD(&htim2, __TIM_ADC_SEC_TO_COUNT(ADC_interval));
+					htim4.Instance->ARR = __TIM_ADC_SEC_TO_COUNT(ADC_interval);
+					//GPS_Config(GPS_interval*1000, TIMEREF_UTC);
+					//__HAL_TIM_SET_AUTORELOAD(&htim4, __TIM_ADC_SEC_TO_COUNT(MQTT_publishInterval));
+					htim2.Instance->ARR = __TIM_MQTT_PUB_SEC_TO_COUNT(MQTT_publishInterval);
+					//__HAL_TIM_SET_AUTORELOAD(&htim5, __TIM_ADC_SEC_TO_COUNT(MQTT_pingInterval));
+					htim5.Instance->ARR = __TIM_MQTT_PING_SEC_TO_COUNT(MQTT_pingInterval);
+
+					htim2.Instance->CNT = 0;
+					htim4.Instance->CNT = 0;
+					htim5.Instance->CNT = 0;
+
+					//htim2.Instance->CR1 |= ~TIM_CR1_CEN;
+					//htim4.Instance->CR1 |= ~TIM_CR1_CEN;
+					//htim5.Instance->CR1 |= ~TIM_CR1_CEN;
 					break;
 				}
 				case USB_REQUEST_MQTT_CONNECT:
@@ -239,6 +260,8 @@ void USB_Process_Reception(uint8_t * report_buffer, uint8_t * output_buffer)
 	}
 	else if(request == USB_REQUEST_GPS)
 	{
+		USB_GPS_report[0] = USB_REQUEST_GPS;
+		memcpy(output_buffer, &USB_GPS_report, 0x40);
 	}
 	else if(request == USB_REQUEST_MQTT_CONNECT)
 	{

@@ -14,6 +14,7 @@
 #include "stm32f4xx_hal.h"
 #include "cmsis_os.h"
 #include "main.h"
+#include "dr_GPS.h"
 #include "dr_GSM.h"
 
 // All in seconds:
@@ -64,6 +65,12 @@ extern uint8_t GPS_interval;
 extern uint8_t ADC_interval;
 
 extern uint8_t MQTT_connection_objective;
+
+extern uint8_t USB_GPS_report[0x40];
+
+extern TIM_HandleTypeDef htim2;
+extern TIM_HandleTypeDef htim4;
+extern TIM_HandleTypeDef htim5;
 
 void USB_Process_Init(uint8_t USBProcessPriority);
 void USB_Process_Reception(uint8_t * report_buffer, uint8_t * output_buffer);

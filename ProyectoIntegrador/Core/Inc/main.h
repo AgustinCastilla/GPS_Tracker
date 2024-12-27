@@ -47,6 +47,10 @@ extern "C" {
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
 
+#define	__TIM_ADC_SEC_TO_COUNT(X)		(60000 * X / 40)
+#define __TIM_MQTT_PUB_SEC_TO_COUNT(X)	(360000 * X / 180)
+#define __TIM_MQTT_PING_SEC_TO_COUNT(X)	(240000 * X / 120)
+
 /* USER CODE END EM */
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);

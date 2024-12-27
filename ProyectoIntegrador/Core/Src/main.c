@@ -77,8 +77,10 @@ DMA_HandleTypeDef hdma_adc1;
 
 SPI_HandleTypeDef hspi2;
 
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart4;
@@ -89,9 +91,11 @@ osThreadId defaultTaskHandle;
 /* USER CODE BEGIN PV */
 
 /*
+ * TIM2: -Publish  (32 bits)
+ * TIM4: -ADC
  * TIM3: PWM Display BL
- * TIM4: Screen Tick
- * TIM6: ADC Conversion Trigger
+ * TIM5: -Ping (32 bits)
+ * TIM6: Screen Tick
  */
 
 // Peripherals variables.
@@ -107,11 +111,11 @@ const char default_MQTT_username[30] = "Nucleo";
 const char default_MQTT_password[30] = "f446re";
 const char default_MQTT_clientIdentifier[16] = "STM32";
 const uint8_t default_MQTT_connectWhenUsbUnplug = 1;
-const uint8_t default_MQTT_publishInterval = 3; // In seconds.
-const uint8_t default_MQTT_pingInterval = 30; // In seconds.
+const uint8_t default_MQTT_publishInterval = 180; // In seconds.
+const uint8_t default_MQTT_pingInterval = 120; // In seconds.
 
 const uint8_t default_GPS_interval = 3; // In seconds.
-const uint8_t default_ADC_interval = 5; // In seconds.
+const uint8_t default_ADC_interval = 40; // In seconds.
 
 // Configuration values.
 char MQTT_host[15] = "190.18.0.169";
@@ -121,11 +125,11 @@ char MQTT_username[30] = "Nucleo";
 char MQTT_password[30] = "f446re";
 char MQTT_clientIdentifier[16] = "STM32";
 uint8_t MQTT_connectWhenUsbUnplug = 1;
-uint8_t MQTT_publishInterval = 3; // In seconds.
-uint8_t MQTT_pingInterval = 30; // In seconds.
+uint8_t MQTT_publishInterval = 180; // In seconds.
+uint8_t MQTT_pingInterval = 120; // In seconds.
 
 uint8_t GPS_interval = 3; // In seconds.
-uint8_t ADC_interval = 5; // In seconds.
+uint8_t ADC_interval = 40; // In seconds.
 
 // Const. variables.
 const uint16_t MQTT_sessionExpire = 180; // Tiempo sin mensajes para ser desconectado del host.
@@ -134,9 +138,10 @@ const uint16_t MQTT_keepAlive = 300; // Tiempo desconectado para que el host olv
 // FreeRTOS
 SemaphoreHandle_t Semaphore_MQTT_Connect;
 SemaphoreHandle_t Semaphore_MQTT_Disconnect;
-
+//SemaphoreHandle_t Semaphore_MQTT_Logged;
+SemaphoreHandle_t Semaphore_MQTT_Publish;
 SemaphoreHandle_t Semaphore_MQTT_Ping;
-SemaphoreHandle_t Semaphore_MQTT_Logged;
+
 QueueHandle_t Screen_Update_Queue;
 
 // Pequé de vagancia
@@ -144,17 +149,21 @@ QueueHandle_t Screen_Update_Queue;
 uint8_t MQTT_connection_objective = MQTT_CONNECTED;
 // Variable en la que se encuentra el sistema:
 uint8_t MQTT_connection_status = MQTT_DISCONNECTED;
+// Buffer para transmitir la información de ubicación por USB:
+uint8_t USB_GPS_report[0x40] = {0x40};
 
 /*
  * TODO:
  * Renombrar variables de GPS.c y GSM.c para que sigan alguna lógica común...
  * Renombrar funciones de GPS.c y GSM.c para que sigan alguna lógica común...
- * Modificar lógica para que conecte/desconecte de MQTT cuando se desee.
  * Chequear si 'GSM_Read_SMS' y 'GSM_Delete_SMS' funcionan.
  * USB: Agregar envío de trama de posición.
  * USB: Agregar lectura y borrado de SMS.
  * Reemplazar variables globales en dr_GPS.c por elementos de FreeRTOS.
  * Reemplazar semáforos que sólo son recibidos en una tarea por notificaciones.
+ * Revisar si las cuentas de los TIMERS están bien.
+ * Revisar si TIM4 puede triggerear al ADC por HW.
+ * Revisar cuanto stack usa cada task y ajustar stack de FreeRTOS.
  *
  * Cosas variables a agregar en QT:
  * - Formato de GPS (DDD, DMM, DMS).
@@ -178,6 +187,8 @@ static void MX_USART3_UART_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_TIM5_Init(void);
 void StartDefaultTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
@@ -195,13 +206,11 @@ void Screen_Update_Task(void * pvParameters);
 /* USER CODE BEGIN 0 */
 
 // Callbacks
-uint8_t B1_Test = 0;
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == B1_Pin)
 	{
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "B1 Press Detect\r\n", 17, HAL_MAX_DELAY);
-		B1_Test = 1;
 	}
 }
 
@@ -223,10 +232,35 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void GPS_New_Data_Callback(NMEA_Type_t type)
 {
+	static NMEA_RMC_Sentence_t RMCdata;
+	static NMEA_GGA_Sentence_t GGAdata;
+
 	uint8_t value;
-	if(type == RMC) value = SCREEN_UPDATE_GPSRMC;
-	else if(type == GGA) value = SCREEN_UPDATE_GPSGGA;
+	if(type == RMC) {
+		value = SCREEN_UPDATE_GPSRMC;
+		GPS_Get_Last_RMC(&RMCdata);
+	}
+	else if(type == GGA) {
+		value = SCREEN_UPDATE_GPSGGA;
+		GPS_Get_Last_GGA(&GGAdata);
+	}
 	xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
+
+	//uint8_t TXbuffer[0x40] = {0};
+	transmit_packet_flags_t flags = {
+			.format = FORMAT_MORE_LEGIBLE,
+			.identifier = 1,
+			.status = 1,
+			.latitude = 1,
+			.longitude = 1,
+			.time = 0,
+			.date = 0,
+			.altitude = 1,
+			.speed = 1,
+			.satellite_qty = 1,
+			.adc_value = 1
+	};
+	Parse_Transmit_Packet((uint8_t *) &USB_GPS_report[1], RMCdata, GGAdata, ADC_Value, flags);
 }
 
 void GSM_New_SMS_Callback(uint8_t index)
@@ -257,8 +291,10 @@ void MQTT_Connect_Task(void * pvParameters)
 			mqtt_logged = 0;
 			delay = GSM_CONNECTIONG_TASK_DELAY;
 			MQTT_connection_status = MQTT_DISCONNECTING;
-			xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
-			xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+			//xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
+			HAL_TIM_Base_Stop_IT(&htim2); // Publish
+			//xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+			HAL_TIM_Base_Stop_IT(&htim5); // Ping
 			xSemaphoreGive(Semaphore_MQTT_Disconnect);
 			xSemaphoreTake(Semaphore_MQTT_Connect, portMAX_DELAY);
 		}
@@ -275,8 +311,10 @@ void MQTT_Connect_Task(void * pvParameters)
 						HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Disconnected\r\n", 19, HAL_MAX_DELAY);
 						mqtt_connected = 0;
 						MQTT_connection_status = MQTT_DISCONNECTED;
-						xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
-						xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+						//xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
+						HAL_TIM_Base_Stop_IT(&htim5); // Ping
+						//xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+						HAL_TIM_Base_Stop_IT(&htim2); // Publish
 						delay = GSM_CONNECTIONG_TASK_DELAY;
 						uint8_t value = SCREEN_UPDATE_CONNECTION;
 						xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
@@ -326,8 +364,10 @@ void MQTT_Connect_Task(void * pvParameters)
 					if(mqtt_logged == MQTT_LOGGED) {
 						HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Connection established\r\n", 29, HAL_MAX_DELAY);
 						MQTT_connection_status = MQTT_CONNECTED;
-						xSemaphoreGive(Semaphore_MQTT_Ping);
-						xSemaphoreGive(Semaphore_MQTT_Logged);
+						//xSemaphoreGive(Semaphore_MQTT_Ping);
+						HAL_TIM_Base_Start_IT(&htim5); // Ping
+						//xSemaphoreGive(Semaphore_MQTT_Logged);
+						HAL_TIM_Base_Start_IT(&htim2); // Publish
 						delay = 2 * GSM_CONNECTIONG_TASK_DELAY;
 						uint8_t value = SCREEN_UPDATE_CONNECTION;
 						xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
@@ -404,23 +444,20 @@ void MQTT_Publish_Task(void * pvParameters)
 {
 	while(1)
 	{
-		if(B1_Test == 1)
-		{
-			GSM_SMS_t outputData;
-			GSM_Read_SMS(1, MEM_NOT_UPDATE, &outputData);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "= SMS index 1: =", 16, HAL_MAX_DELAY);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\nSender: ", 10, HAL_MAX_DELAY);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) outputData.sender, strlen((char *) (&outputData.sender)), HAL_MAX_DELAY);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\nSMS text: ", 12, HAL_MAX_DELAY);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) outputData.txt, strlen((char *) (&outputData.txt)), HAL_MAX_DELAY);
-			HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\n", 2, HAL_MAX_DELAY);
-			B1_Test = 0;
-			//vTaskDelay(15 * 1000 / portTICK_PERIOD_MS);
-		}
+		//GSM_SMS_t outputData;
+		//GSM_Read_SMS(1, MEM_NOT_UPDATE, &outputData);
+		//HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "= SMS index 1: =", 16, HAL_MAX_DELAY);
+		//HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\nSender: ", 10, HAL_MAX_DELAY);
+		//HAL_UART_Transmit(DEBUG_UART, (uint8_t *) outputData.sender, strlen((char *) (&outputData.sender)), HAL_MAX_DELAY);
+		//HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\nSMS text: ", 12, HAL_MAX_DELAY);
+		//HAL_UART_Transmit(DEBUG_UART, (uint8_t *) outputData.txt, strlen((char *) (&outputData.txt)), HAL_MAX_DELAY);
+		//HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "\r\n", 2, HAL_MAX_DELAY);
+
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing-Take\r\n", 22, HAL_MAX_DELAY);
-		xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+		//xSemaphoreTake(Semaphore_MQTT_Logged, portMAX_DELAY);
+		xSemaphoreTake(Semaphore_MQTT_Publish, portMAX_DELAY);
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing-Give\r\n", 22, HAL_MAX_DELAY);
-		xSemaphoreGive(Semaphore_MQTT_Logged);
+		//xSemaphoreGive(Semaphore_MQTT_Logged);
 
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT Publishing in process...\r\n", 31, HAL_MAX_DELAY);
 
@@ -452,7 +489,7 @@ void MQTT_Publish_Task(void * pvParameters)
 			xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
 		}
 
-		vTaskDelay(5000 / portTICK_RATE_MS);
+		//vTaskDelay(5000 / portTICK_RATE_MS);
 	}
 }
 
@@ -463,13 +500,13 @@ void MQTT_Ping_Task(void * pvParameters)
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq-Take\r\n", 19, HAL_MAX_DELAY);
 		xSemaphoreTake(Semaphore_MQTT_Ping, portMAX_DELAY);
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq-Give\r\n", 19, HAL_MAX_DELAY);
-		xSemaphoreGive(Semaphore_MQTT_Ping);
+		//xSemaphoreGive(Semaphore_MQTT_Ping);
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq\r\n", 14, HAL_MAX_DELAY);
 		GSM_MQTT_Ping();
 		HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "MQTT PingReq-End\r\n", 18, HAL_MAX_DELAY);
 		uint8_t value = SCREEN_UPDATE_MQTTPING;
 		xQueueSend(Screen_Update_Queue, &value, portMAX_DELAY);
-		vTaskDelay(120 * 1000 / portTICK_RATE_MS);
+		//vTaskDelay(120 * 1000 / portTICK_RATE_MS);
 	}
 }
 
@@ -566,6 +603,7 @@ int main(void)
 
   /* Configure the system clock */
   SystemClock_Config();
+
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
@@ -581,6 +619,8 @@ int main(void)
   MX_SPI2_Init();
   MX_TIM4_Init();
   MX_TIM6_Init();
+  MX_TIM2_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
   // Screen start
@@ -594,7 +634,7 @@ int main(void)
 
   // GPS Config
   GPS_Init(GPS_UART, tskIDLE_PRIORITY + 2);
-  GPS_Config(3000, TIMEREF_UTC);
+  GPS_Config(default_GPS_interval, TIMEREF_UTC);
   GPS_Config_Sentence(GGA, SENTENCE_ENABLED);
   GPS_Config_Sentence(RMC, SENTENCE_ENABLED);
   GPS_Config_Sentence(GLL, SENTENCE_DISABLED);
@@ -614,10 +654,10 @@ int main(void)
   HAL_UART_Receive_IT(GSM_UART, (uint8_t *) &simRxByte, 1);
 
   // Screen timer
-  HAL_TIM_Base_Start_IT(&htim4);
+  HAL_TIM_Base_Start_IT(&htim6);
 
   // Init ADC
-  HAL_TIM_Base_Start_IT(&htim6);
+  HAL_TIM_Base_Start_IT(&htim4);
 
   /* USER CODE END 2 */
 
@@ -633,8 +673,9 @@ int main(void)
   xSemaphoreGive(Semaphore_MQTT_Connect);
   MQTT_connection_status = MQTT_CONNECTING;
 
+  Semaphore_MQTT_Publish = xSemaphoreCreateBinary();
   Semaphore_MQTT_Ping = xSemaphoreCreateBinary();
-  Semaphore_MQTT_Logged = xSemaphoreCreateBinary();
+  //Semaphore_MQTT_Logged = xSemaphoreCreateBinary();
 
   //xSemaphoreGive(Semaphore_Screen_Update);
 
@@ -653,8 +694,8 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  //osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
-  //defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
+  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -673,7 +714,7 @@ int main(void)
   if(Task_Check == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
 	  HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY: MQTT Publish Task\r\n", 58, HAL_MAX_DELAY);
 
-  Task_Check = xTaskCreate(MQTT_Ping_Task, "MQTT Ping Task", 512, NULL, tskIDLE_PRIORITY + 2, NULL);
+  Task_Check = xTaskCreate(MQTT_Ping_Task, "MQTT Ping Task", 1024, NULL, tskIDLE_PRIORITY + 2, NULL);
   if(Task_Check == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
 	  HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY: MQTT Ping Task\r\n", 5, HAL_MAX_DELAY);
 
@@ -688,7 +729,7 @@ int main(void)
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
-  //osKernelStart();
+  osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
 
@@ -842,6 +883,51 @@ static void MX_SPI2_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 35999;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 360000;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief TIM3 Initialization Function
   * @param None
   * @retval None
@@ -923,9 +1009,9 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 1 */
   htim4.Instance = TIM4;
-  htim4.Init.Prescaler = 49999;
+  htim4.Init.Prescaler = 47999;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 1000;
+  htim4.Init.Period = 60000;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
@@ -950,6 +1036,51 @@ static void MX_TIM4_Init(void)
 }
 
 /**
+  * @brief TIM5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM5_Init(void)
+{
+
+  /* USER CODE BEGIN TIM5_Init 0 */
+
+  /* USER CODE END TIM5_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM5_Init 1 */
+
+  /* USER CODE END TIM5_Init 1 */
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 35999;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 240000;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM5_Init 2 */
+
+  /* USER CODE END TIM5_Init 2 */
+
+}
+
+/**
   * @brief TIM6 Initialization Function
   * @param None
   * @retval None
@@ -967,9 +1098,9 @@ static void MX_TIM6_Init(void)
 
   /* USER CODE END TIM6_Init 1 */
   htim6.Instance = TIM6;
-  htim6.Init.Prescaler = 35999;
+  htim6.Init.Prescaler = 47999;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 10000;
+  htim6.Init.Period = 1000;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
@@ -1210,18 +1341,26 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-  if(htim->Instance == TIM4) {
+  if(htim->Instance == TIM2) {
 	  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-	  uint8_t value = SCREEN_UPDATE_TICK;
-	  xQueueSendFromISR(Screen_Update_Queue, &value, &xHigherPriorityTaskWoken);
+	  xSemaphoreGiveFromISR(Semaphore_MQTT_Publish, &xHigherPriorityTaskWoken);
+	  portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
   }
-  if(htim->Instance == TIM6) {
+  else if(htim->Instance == TIM4) {
 	  //HAL_UART_Transmit(DEBUG_UART, (uint8_t *) "ADC Conversion Trigger\r\n", 24, HAL_MAX_DELAY);
 	  HAL_ADC_Start_DMA(&hadc1, (uint32_t *) &ADC_Value, 1);
   }
-
-  //portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+  else if(htim->Instance == TIM5) {
+	  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	  xSemaphoreGiveFromISR(Semaphore_MQTT_Ping, &xHigherPriorityTaskWoken);
+	  portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+  }
+  else if(htim->Instance == TIM6) {
+	  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	  uint8_t value = SCREEN_UPDATE_TICK;
+	  xQueueSendFromISR(Screen_Update_Queue, &value, &xHigherPriorityTaskWoken);
+	  portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+  }
   /* USER CODE END Callback 1 */
 }
 

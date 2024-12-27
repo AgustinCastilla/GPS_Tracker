@@ -935,6 +935,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CIPSHUT\r\n", 12, readySH, HANDSHAKE_SHUTOK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_CIPSHUT_ERR;
 	}
@@ -942,6 +943,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CGATT=1\r\n", 12, readySH, HANDSHAKE_OK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_GATT_ERR;
 	}
@@ -951,6 +953,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CIPMODE=0\r\n", 14, readySH, HANDSHAKE_OK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_CIPMODE_ERR;
 	}
@@ -958,6 +961,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CIPHEAD=1\r\n", 14, readySH, HANDSHAKE_OK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_CIPHEAD_ERR;
 	}
@@ -965,6 +969,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CIPSRIP=1\r\n", 14, readySH, HANDSHAKE_OK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_CIPSRIP_ERR;
 	}
@@ -979,6 +984,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CIICR\r\n", 10, readySH, HANDSHAKE_OK);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_CIICR_ERR;
 	}
@@ -986,6 +992,7 @@ GSM_Error_t GSM_NET_Init(void)
 	Add_CMD_To_Queue((uint8_t *) "AT+CIFSR\r\n", 10, readySH, HANDSHAKE_WHATEVER);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	if(_rx_last_error != GSM_ERR_OK) {
+		vSemaphoreDelete(readySH);
 	    xSemaphoreGive(Semaphore_TX_Function);
 		return GSM_CIFSR_ERR;
 	}
@@ -1051,7 +1058,9 @@ void GSM_MQTT_Disconnect(void)
     //Add_CMD_To_Queue((uint8_t *) "ATO\r\n", 5, NULL, HANDSHAKE_WHATEVER);
     //Add_CMD_To_Queue((uint8_t *) "AT+CIPSHUT\r\n", 12, NULL, HANDSHAKE_WHATEVER);
 	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
+	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
     Add_CMD_To_Queue((uint8_t *) "AT+CIPCLOSE\r\n", 13, readySH, HANDSHAKE_OK);
+    xSemaphoreGive(Semaphore_TX_Function);
 	xSemaphoreTake(readySH, portMAX_DELAY);
 	vSemaphoreDelete(readySH);
 }
@@ -1059,13 +1068,14 @@ void GSM_MQTT_Disconnect(void)
 void GSM_MQTT_Pub(char * topic, char * payload)
 {
 	if(_UART_Handle == NULL) return;
-
 	uint8_t buffer[MQTT_MAX_PACKET_LEN];
     uint8_t len = MQTT_Parse_Publish((uint8_t *) &buffer, topic, (uint8_t *) payload, strlen(payload));
 
-
     char aux[48] = {0};
 	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
+	if(readySH == NULL)
+		return;
+
     strcat((char *) &aux, "AT+CIPSEND=");
 	char len_str[8];
 	itoa(len, (char *) &len_str, 10);
@@ -1075,33 +1085,25 @@ void GSM_MQTT_Pub(char * topic, char * payload)
 	Add_CMD_To_Queue((uint8_t *) &aux, strlen((char *) &aux), readySH, HANDSHAKE_ARROW);
     Add_CMD_To_Queue((uint8_t *) &buffer, len, NULL, HANDSHAKE_OK);
     xSemaphoreGive(Semaphore_TX_Function);
+	vSemaphoreDelete(readySH);
 }
-
-uint8_t TESTPING = 0;
 
 void GSM_MQTT_Ping(void)
 {
-	TESTPING = 1;
 	if(_UART_Handle == NULL) return;
-	TESTPING = 2;
 	uint8_t cmd[2] = {MQTT_PINGREQ, 0x00};
 
-	TESTPING = 3;
 	SemaphoreHandle_t readySH = xSemaphoreCreateBinary();
-	TESTPING = 4;
-	uint8_t aux[16] = "AT+CIPSEND=2\r\n";
-	TESTPING = 5;
-	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
-	TESTPING = 6;
-	Add_CMD_To_Queue((uint8_t *) &aux, 14, readySH, HANDSHAKE_ARROW); // ---
-	TESTPING = 7;
-	xSemaphoreTake(readySH, portMAX_DELAY); // ---
-	TESTPING = 8;
+	if(readySH == NULL)
+		return;
 
+	uint8_t aux[16] = "AT+CIPSEND=2\r\n";
+	xSemaphoreTake(Semaphore_TX_Function, portMAX_DELAY);
+	Add_CMD_To_Queue((uint8_t *) &aux, 14, readySH, HANDSHAKE_ARROW);
+	xSemaphoreTake(readySH, portMAX_DELAY);
     Add_CMD_To_Queue((uint8_t *) &cmd, 2, NULL, HANDSHAKE_OK);
-    TESTPING = 9;
     xSemaphoreGive(Semaphore_TX_Function);
-    TESTPING = 10;
+	vSemaphoreDelete(readySH);
 }
 
 __weak void GSM_New_SMS_Callback(uint8_t index)
